@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "default": "direct",
+  "unidentified": "direct",
+  "rules": [
+    {
+      "name": "Chrome through the gateway",
+      "action": "gateway",
+      "apps": [
+        { "windows": { "exe": "chrome.exe" },
+          "macos":   { "bundleId": "com.google.Chrome" },
+          "android": { "package": "com.android.chrome" } }
+      ]
+    },
+    {
+      "name": "Block Windows telemetry runner",
+      "action": "block",
+      "apps": [
+        { "windows": { "path": "%SystemRoot%\\System32\\CompatTelRunner.exe" } }
+      ]
+    }
+  ]
+}

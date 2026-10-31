@@ -1,0 +1,7 @@
+{
+  "tagOwners": { "tag:laptops": ["alice@example.com"] },
+  "nodeAttrs": [
+    { "target": ["tag:laptops"],
+      "app": { "meshwall.dev/cap/app-routing": [ { "version": 1, "default": "direct", "rules": [] } ] } }
+  ]
+}

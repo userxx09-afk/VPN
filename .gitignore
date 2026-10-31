@@ -1,0 +1,13 @@
+bin/
+server/data/
+server/*.log
+node/
+toolchain/
+
+# Forks: separate git repositories (branches meshwall/*), not tracked here.
+tailscale/
+headscale/
+tailscale-android/
+
+# Headscale runtime socket (its unix_socket path resolves from the working dir)
+data/

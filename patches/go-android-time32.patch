@@ -1,0 +1,26 @@
+--- a/src/runtime/os_linux32.go
++++ b/src/runtime/os_linux32.go
+@@ -7,6 +7,7 @@
+ package runtime
+ 
+ import (
++	"internal/goos"
+ 	"unsafe"
+ )
+ 
+@@ -26,6 +27,15 @@
+ // reaching the probing fallback generally means we are on neither,
+ // and probing is the safest available signal.
+ func configure64bitsTimeOn32BitsArchitectures() {
++	// meshwall patch: on Android, always use the 32-bit time syscalls.
++	// The app seccomp filter is tied to the Android release, not the
++	// kernel: Fire OS 7 (Android 9) ships 5.4 kernels, so the version
++	// check below picks futex_time64, which seccomp kills with SIGSYS.
++	// The time32 variants are allowed on every Android release.
++	if goos.IsAndroid == 1 {
++		use64bitsTimeOn32bits = false
++		return
++	}
+ 	if kv, ok := getKernelVersion(); ok {
+ 		use64bitsTimeOn32bits = kv.GE(5, 1)
+ 		return
