@@ -1,0 +1,42 @@
+// Headscale policy for the meshwall test network.
+{
+  // Everyone in the tailnet can reach everyone (same as having no policy).
+  "acls": [
+    { "action": "accept", "src": ["*"], "dst": ["*:*"] }
+  ],
+
+  // Approve exit nodes and 4via6 gateway routes from our own devices
+  // automatically, so "Run as exit node" works without a CLI step.
+  "autoApprovers": {
+    "exitNode": ["admin@"],
+    "routes": { "fd7a:115c:a1e0:b1a::/64": ["admin@"] }
+  },
+
+  // Per-app routing policy, pushed to every node. Apps not listed go direct.
+  "nodeAttrs": [
+    {
+      "target": ["*"],
+      "app": {
+        "meshwall.dev/cap/app-routing": [
+          {
+            "version": 1,
+            "default": "direct",
+            "unidentified": "direct",
+            "gatewayUnavailable": "block",
+            "rules": [
+              {
+                "name": "Browsers and curl through the exit node",
+                "action": "gateway",
+                "apps": [
+                  { "windows": { "exe": "chrome.exe" } },
+                  { "windows": { "exe": "firefox.exe" } },
+                  { "windows": { "exe": "curl.exe" } }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}
