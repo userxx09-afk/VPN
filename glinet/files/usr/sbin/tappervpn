@@ -1,0 +1,5 @@
+#!/bin/sh
+# TapperVPN command line: the same commands as `tailscale`, e.g.
+#   tappervpn status
+#   tappervpn exit-node list
+TS_BE_CLI=1 exec /usr/sbin/tappervpnd --socket=/var/run/tappervpn/tappervpnd.sock "$@"

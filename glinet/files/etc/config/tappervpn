@@ -1,0 +1,32 @@
+
+config tappervpn 'main'
+	# Set to 1 once login_server (and auth_key for the first sign-in) are filled in.
+	option enabled '0'
+	# Our control server (Headscale), e.g. https://vpn.example.com
+	option login_server ''
+	# Pre-auth key from `headscale preauthkeys create`; only needed for the first sign-in.
+	option auth_key ''
+	# Name shown in the device list; empty means the router's hostname.
+	option hostname ''
+	# Exit node to send LAN traffic through: its name or 100.x address. Empty = none.
+	option exit_node ''
+	# Which LAN traffic uses the exit node:
+	#   all      every device on the LAN
+	#   clients  only the devices in client_mac and the networks in client_zone
+	#   domains  only connections to the sites in domain (any device)
+	#   none     no LAN traffic; the router just joins the VPN (e.g. to be an exit node)
+	option mode 'all'
+	# Used by mode 'clients': device MAC addresses, and firewall zones (e.g. 'guest').
+	#list client_mac 'aa:bb:cc:dd:ee:ff'
+	#list client_zone 'guest'
+	# Used by mode 'domains': a site also covers its subdomains.
+	#list domain 'espn.com'
+	# Mode 'domains': resolve those sites through the exit node, so they see its location.
+	option dns_via_exit '1'
+	# Reject IPv6 for tunneled traffic so apps fall back to IPv4 right away
+	# (the tunnel carries IPv4 only for LAN devices).
+	option block_ipv6 '1'
+	# Let other VPN devices use this router as their exit node.
+	option advertise_exit_node '0'
+	# UDP port for peer-to-peer traffic.
+	option port '41642'

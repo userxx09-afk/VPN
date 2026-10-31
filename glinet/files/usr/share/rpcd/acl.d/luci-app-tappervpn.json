@@ -1,0 +1,18 @@
+{
+	"luci-app-tappervpn": {
+		"description": "Grant access to TapperVPN settings",
+		"read": {
+			"file": {
+				"/usr/sbin/tappervpn status": [ "exec" ],
+				"/usr/sbin/tappervpn exit-node list": [ "exec" ]
+			},
+			"ubus": {
+				"luci-rpc": [ "getHostHints" ]
+			},
+			"uci": [ "tappervpn" ]
+		},
+		"write": {
+			"uci": [ "tappervpn" ]
+		}
+	}
+}

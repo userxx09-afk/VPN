@@ -1,0 +1,305 @@
+#!/bin/sh
+# Signs the router in to TapperVPN and sets up which LAN traffic uses the
+# exit node. Called by /etc/init.d/tappervpn:
+#   apply start     after tappervpnd starts (and on settings changes)
+#   apply teardown  when the service stops or is disabled
+#
+# How LAN traffic reaches the exit node: tappervpnd's policy routing (ip rule
+# 5270 -> table 52) sends everything to tapper0 once an exit node is set. In
+# modes 'clients' and 'domains' the firewall marks the chosen traffic, rule
+# 5262 sends it to table 52 and rule 5265 sends the rest to the main table
+# (direct). The
+# 'tappervpn' firewall zone masquerades LAN devices behind the router's VPN
+# address, since the exit node only accepts traffic from VPN addresses.
+
+. /lib/functions.sh
+
+SOCK=/var/run/tappervpn/tappervpnd.sock
+CLI=/usr/sbin/tappervpn
+MARK=0x1000000
+TABLE=52            # tappervpnd's routing table
+TAILNET4=100.64.0.0/10
+QUAD100=100.100.100.100
+DNSMASQ_FILE=tappervpn.conf
+
+log() { logger -t tappervpn "$*"; }
+
+has_fw4() { [ -x /sbin/fw4 ]; }
+
+# --- routing rules ---------------------------------------------------------
+
+del_rules() {
+	local p
+	for p in 5262 5263 5265; do
+		while ip rule del priority $p 2>/dev/null; do :; done
+	done
+}
+
+# These sit just ahead of tappervpnd's catch-all rule 5270 (lookup 52).
+add_rules() {
+	# Marked traffic uses the tunnel when an exit node is set (table 52 then
+	# has a default route; LAN subnets are "throw" routes, so they fall through).
+	ip rule add priority 5262 fwmark "$MARK/$MARK" lookup "$TABLE"
+	# Tailnet addresses (and the 100.100.100.100 resolver) always use the tunnel.
+	ip rule add priority 5263 to "$TAILNET4" lookup "$TABLE"
+	# Everything else goes out directly.
+	ip rule add priority 5265 lookup main
+}
+
+# --- firewall --------------------------------------------------------------
+
+del_firewall() {
+	local s
+	for s in $(uci -q show firewall | sed -n 's/^firewall\.\(tappervpn[a-z0-9_]*\)=.*/\1/p'); do
+		uci -q delete "firewall.$s"
+	done
+}
+
+# fw_mark NAME OPTION VALUE...: a rule marking LAN traffic for the exit node.
+fw_mark() {
+	local name="$1" src="$2"
+	uci -q batch <<-EOF
+		set firewall.$name=rule
+		set firewall.$name.name='TapperVPN: use exit node'
+		set firewall.$name.src='$src'
+		set firewall.$name.proto='all'
+		set firewall.$name.target='MARK'
+		set firewall.$name.set_xmark='$MARK/$MARK'
+	EOF
+}
+
+# fw_block6 NAME SRC: rejects forwarded IPv6 from SRC (filters added by caller).
+fw_block6() {
+	local name="$1" src="$2"
+	uci -q batch <<-EOF
+		set firewall.$name=rule
+		set firewall.$name.name='TapperVPN: no IPv6 for tunneled traffic'
+		set firewall.$name.src='$src'
+		set firewall.$name.dest='*'
+		set firewall.$name.proto='all'
+		set firewall.$name.family='ipv6'
+		set firewall.$name.target='REJECT'
+	EOF
+}
+
+fw_ipset() {
+	local name="$1" family="$2"
+	uci -q batch <<-EOF
+		set firewall.$name=ipset
+		set firewall.$name.name='$name'
+		set firewall.$name.family='$family'
+		add_list firewall.$name.match='dest_ip'
+	EOF
+	has_fw4 || uci set "firewall.$name.storage=hash"
+}
+
+setup_firewall() {
+	local mode="$1" block6="$2" advertise="$3" zones="$4" macs="$5"
+	local z i=0
+
+	uci -q batch <<-EOF
+		set firewall.tappervpn=zone
+		set firewall.tappervpn.name='tappervpn'
+		add_list firewall.tappervpn.device='tapper0'
+		set firewall.tappervpn.input='ACCEPT'
+		set firewall.tappervpn.output='ACCEPT'
+		set firewall.tappervpn.forward='REJECT'
+		set firewall.tappervpn.masq='1'
+		set firewall.tappervpn.mtu_fix='1'
+		set firewall.tappervpn_lan=forwarding
+		set firewall.tappervpn_lan.src='lan'
+		set firewall.tappervpn_lan.dest='tappervpn'
+	EOF
+	if [ "$advertise" = 1 ]; then
+		uci -q batch <<-EOF
+			set firewall.tappervpn_exit=forwarding
+			set firewall.tappervpn_exit.src='tappervpn'
+			set firewall.tappervpn_exit.dest='wan'
+		EOF
+	fi
+
+	case "$mode" in
+	all)
+		[ "$block6" = 1 ] && fw_block6 tappervpn_v6 lan
+		;;
+	clients)
+		for z in $zones; do
+			i=$((i + 1))
+			uci -q batch <<-EOF
+				set firewall.tappervpn_fz$i=forwarding
+				set firewall.tappervpn_fz$i.src='$z'
+				set firewall.tappervpn_fz$i.dest='tappervpn'
+			EOF
+			fw_mark "tappervpn_mz$i" "$z"
+			[ "$block6" = 1 ] && fw_block6 "tappervpn_v6z$i" "$z"
+		done
+		if [ -n "$macs" ]; then
+			fw_mark tappervpn_mmac lan
+			[ "$block6" = 1 ] && fw_block6 tappervpn_v6mac lan
+			for z in $macs; do
+				uci add_list "firewall.tappervpn_mmac.src_mac=$z"
+				[ "$block6" = 1 ] && uci add_list "firewall.tappervpn_v6mac.src_mac=$z"
+			done
+		fi
+		;;
+	domains)
+		fw_ipset tappervpn_dst ipv4
+		fw_mark tappervpn_mdst lan
+		uci set firewall.tappervpn_mdst.ipset='tappervpn_dst'
+		if [ "$block6" = 1 ]; then
+			fw_ipset tappervpn_dst6 ipv6
+			fw_block6 tappervpn_v6dst lan
+			uci set firewall.tappervpn_v6dst.ipset='tappervpn_dst6'
+		fi
+		;;
+	esac
+}
+
+# --- DNS (mode 'domains') --------------------------------------------------
+
+dnsmasq_dirs() {
+	local d found=
+	for d in /tmp/dnsmasq.d /tmp/dnsmasq.*.d; do
+		[ -d "$d" ] && { echo "$d"; found=1; }
+	done
+	[ -n "$found" ] || { mkdir -p /tmp/dnsmasq.d; echo /tmp/dnsmasq.d; }
+}
+
+del_dnsmasq() {
+	local d changed=1
+	for d in $(dnsmasq_dirs); do
+		[ -f "$d/$DNSMASQ_FILE" ] && { rm -f "$d/$DNSMASQ_FILE"; changed=0; }
+	done
+	return $changed
+}
+
+setup_dnsmasq() {
+	local domains="$1" block6="$2" via_exit="$3"
+	local d dom tmp=/tmp/tappervpn.dnsmasq sets
+
+	if has_fw4; then
+		sets="4#inet#fw4#tappervpn_dst"
+		[ "$block6" = 1 ] && sets="$sets,6#inet#fw4#tappervpn_dst6"
+		dnsmasq --version 2>/dev/null | grep -q ' nftset' ||
+			log "warning: dnsmasq lacks nftset support; install dnsmasq-full for mode 'domains'"
+	else
+		sets="tappervpn_dst"
+		[ "$block6" = 1 ] && sets="$sets,tappervpn_dst6"
+		dnsmasq --version 2>/dev/null | grep -q ' ipset' ||
+			log "warning: dnsmasq lacks ipset support; install dnsmasq-full for mode 'domains'"
+	fi
+
+	: >"$tmp"
+	for dom in $domains; do
+		if has_fw4; then
+			echo "nftset=/$dom/$sets" >>"$tmp"
+		else
+			echo "ipset=/$dom/$sets" >>"$tmp"
+		fi
+		[ "$via_exit" = 1 ] && echo "server=/$dom/$QUAD100" >>"$tmp"
+	done
+	for d in $(dnsmasq_dirs); do
+		cp "$tmp" "$d/$DNSMASQ_FILE"
+	done
+	rm -f "$tmp"
+}
+
+# --- sign-in ---------------------------------------------------------------
+
+wait_for_daemon() {
+	local n=0
+	while [ ! -S "$SOCK" ]; do
+		n=$((n + 1))
+		[ $n -gt 60 ] && return 1
+		sleep 1
+	done
+}
+
+sign_in() {
+	local server="$1" key="$2" host="$3" exit_node="$4" advertise="$5"
+	local keyfile=/var/run/tappervpn/authkey out
+	set -- up --reset --timeout=60s \
+		--login-server="$server" \
+		--netfilter-mode=off \
+		--accept-dns=false \
+		--advertise-exit-node="$( [ "$advertise" = 1 ] && echo true || echo false )"
+	[ -n "$host" ] && set -- "$@" --hostname="$host"
+	[ -n "$exit_node" ] && set -- "$@" --exit-node="$exit_node" --exit-node-allow-lan-access
+	if [ -n "$key" ]; then
+		umask 077
+		printf '%s' "$key" >"$keyfile"
+		set -- "$@" --auth-key="file:$keyfile"
+	fi
+	out=$("$CLI" "$@" 2>&1)
+	local rc=$?
+	rm -f "$keyfile"
+	[ -n "$out" ] && log "$out"
+	return $rc
+}
+
+# --- main ------------------------------------------------------------------
+
+teardown() {
+	del_rules
+	del_firewall
+	uci commit firewall
+	/etc/init.d/firewall reload >/dev/null 2>&1
+	del_dnsmasq && /etc/init.d/dnsmasq restart >/dev/null 2>&1
+	return 0
+}
+
+start() {
+	local server key host exit_node mode block6 via_exit advertise zones macs domains
+
+	config_load tappervpn
+	config_get server main login_server
+	config_get key main auth_key
+	config_get host main hostname
+	config_get exit_node main exit_node
+	config_get mode main mode all
+	config_get_bool block6 main block_ipv6 1
+	config_get_bool via_exit main dns_via_exit 1
+	config_get_bool advertise main advertise_exit_node 0
+	config_get zones main client_zone
+	config_get macs main client_mac
+	config_get domains main domain
+
+	[ -n "$server" ] || { log "login_server is not set"; return 1; }
+	# A node can't use an exit node while offering to be one.
+	if [ "$advertise" = 1 ] || [ "$mode" = none ]; then
+		exit_node=
+	fi
+
+	wait_for_daemon || { log "tappervpnd did not start"; return 1; }
+	if sign_in "$server" "$key" "$host" "$exit_node" "$advertise"; then
+		log "connected (mode=$mode exit_node=${exit_node:-none})"
+	else
+		log "sign-in did not finish; check login_server and auth_key"
+	fi
+
+	del_rules
+	del_firewall
+	setup_firewall "$mode" "$block6" "$advertise" "$zones" "$macs"
+	uci commit firewall
+	/etc/init.d/firewall reload >/dev/null 2>&1
+
+	case "$mode" in
+	clients | domains) add_rules ;;
+	esac
+
+	if [ "$mode" = domains ] && [ -n "$domains" ]; then
+		setup_dnsmasq "$domains" "$block6" "$via_exit"
+		/etc/init.d/dnsmasq restart >/dev/null 2>&1
+	elif del_dnsmasq; then
+		/etc/init.d/dnsmasq restart >/dev/null 2>&1
+	fi
+}
+
+case "$1" in
+start) start ;;
+teardown) teardown ;;
+*)
+	echo "usage: $0 start|teardown" >&2
+	exit 1
+	;;
+esac
