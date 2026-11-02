@@ -8,7 +8,7 @@ param(
     [switch]$Restamp,  # regenerate tailscale.version (after go.mod changes)
     # Control server the app signs in to (our Headscale). Use an address every
     # device can reach; give this PC a DHCP reservation so it doesn't change.
-    [string]$ControlURL = "http://192.168.4.53:8080"
+    [string]$ControlURL = "http://192.168.5.207:8080"
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent

@@ -1,7 +1,7 @@
 # Joins this machine to the mesh using the saved pre-auth key.
 # Run (as Administrator) after start-node.ps1 is running in another window.
 param(
-    [string]$LoginServer = "http://192.168.4.53:8080",
+    [string]$LoginServer = "http://192.168.5.207:8080",
     [switch]$Gateway   # advertise this node as a gateway (exit node)
 )
 $root = Split-Path $PSScriptRoot -Parent

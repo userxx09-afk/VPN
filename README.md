@@ -39,7 +39,7 @@ WireGuard LLC). Without it, the daemon only runs with `--tun=userspace-networkin
 | 2. Node daemon (leave running) | `scripts\start-node.ps1` (optional: `-Policy examples\approuting-chrome-only.json -LogFlows` for per-app routing) | Yes |
 | 3. Join the mesh | `scripts\join.ps1` (add `-Gateway` to advertise as gateway) | Yes |
 
-- Server config: `server/config.yaml` (listens on `0.0.0.0:8080`, advertises `http://192.168.4.53:8080`).
+- Server config: `server/config.yaml` (listens on `0.0.0.0:8080`, advertises `http://192.168.5.207:8080`).
   Data paths in it must be **relative** (to the config's folder): Headscale treats `C:/...` as relative.
 - Join key: `server/data/preauthkey.json` (reusable, expires 2026-10-21). Make a new one with
   `bin\headscale.exe -c server\config.yaml preauthkeys create --user 1 --reusable --expiration 72h`.
@@ -84,3 +84,18 @@ Note: the official Tailscale Windows tray GUI is not open source. We use the ope
   (`hscontrol/testdata/apiv1_golden/...->_400_parity.json`). It shows up as a staged
   deletion in `git status`. Harmless for building; don't commit that deletion.
 - Before releasing, rename and rebrand: the "Tailscale" name and logo are trademarks.
+
+## Production server (Ubuntu)
+
+Since 2026-11-01 the control server runs on the Ubuntu 24.04 VM `frank` (192.168.5.207, ssh alias `tapper`),
+not on the Windows dev box.
+
+| What | Where on the server |
+|---|---|
+| Binaries (built here with `GOOS=linux GOARCH=amd64 CGO_ENABLED=0`) | `/usr/local/bin/headscale`, `tailscale`, `tailscaled` |
+| Config / policy | `/etc/headscale/config.yaml`, `/etc/headscale/policy.hujson` |
+| Database + noise key | `/var/lib/headscale/` |
+| Service | `systemctl status headscale` (runs as user `headscale`, starts on boot) |
+| Admin CLI | `headscale -c /etc/headscale/config.yaml nodes list`, run as the `headscale` user |
+
+Clients use `http://192.168.5.207:8080` (LAN only until HTTPS and port forwarding are set up).
