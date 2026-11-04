@@ -45,7 +45,7 @@ import (
 //     completes the Noise handshake with headscale over the WebSocket.
 //
 // The server cannot tell the two apart: both send GET /ts2021 with
-// Sec-WebSocket-Protocol: tappervpn-control-protocol. Before the fix both fail
+// Sec-WebSocket-Protocol: tailscale-control-protocol. Before the fix both fail
 // with 405; after it, both complete the handshake.
 
 // TestTS2021WebSocketGET connects to /ts2021 over a WebSocket GET from the test
@@ -208,7 +208,7 @@ func wasmClientService(s *Scenario, networkName string) (*dockertest.Resource, e
 }
 
 // dialTS2021WebSocket opens /ts2021 as a WebSocket GET (subprotocol
-// tappervpn-control-protocol) and completes the Noise handshake, mirroring what
+// tailscale-control-protocol) and completes the Noise handshake, mirroring what
 // tappervpn.com/control/controlhttp/client_js.go does in a browser. It returns
 // the established Noise connection, or an error (a router that only allows POST
 // returns 405 here).

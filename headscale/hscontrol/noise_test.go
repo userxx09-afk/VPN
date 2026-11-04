@@ -817,7 +817,7 @@ func TestTS2021Route_AcceptsGETAndPOST(t *testing.T) {
 				"Upgrade":                "websocket",
 				"Sec-WebSocket-Version":  "13",
 				"Sec-WebSocket-Key":      "dGhlIHNhbXBsZSBub25jZQ==",
-				"Sec-WebSocket-Protocol": "tappervpn-control-protocol",
+				"Sec-WebSocket-Protocol": "tailscale-control-protocol",
 			},
 		},
 		{
@@ -825,8 +825,8 @@ func TestTS2021Route_AcceptsGETAndPOST(t *testing.T) {
 			method: http.MethodPost,
 			headers: map[string]string{
 				"Connection":            "upgrade",
-				"Upgrade":               "tappervpn-control-protocol",
-				"X-TapperVPN-Handshake": "AAAA",
+				"Upgrade":               "tailscale-control-protocol",
+				"X-Tailscale-Handshake": "AAAA",
 			},
 		},
 	}
@@ -836,7 +836,7 @@ func TestTS2021Route_AcceptsGETAndPOST(t *testing.T) {
 			t.Parallel()
 
 			req := httptest.NewRequestWithContext(context.Background(), tt.method,
-				"/ts2021?X-TapperVPN-Handshake=AAAA", nil)
+				"/ts2021?X-Tailscale-Handshake=AAAA", nil)
 			for k, v := range tt.headers {
 				req.Header.Set(k, v)
 			}

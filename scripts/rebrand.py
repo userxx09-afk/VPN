@@ -56,6 +56,11 @@ PROTECT = [
     # Wire protocol with servers Tailscale runs (public DERP relays answer
     # /generate_204 captive-portal checks with these headers).
     re.compile(r"X-Tailscale-(?:Challenge|Response)"),
+    # The control-server handshake (Noise prologue, HTTP upgrade): keeps
+    # TapperVPN and Headscale compatible with Tailscale clients and servers.
+    re.compile(r"Tailscale Control Protocol v"),
+    re.compile(r"tailscale-control-protocol"),
+    re.compile(r"X-Tailscale-Handshake"),
 ]
 
 MODULE_RENAMES = [

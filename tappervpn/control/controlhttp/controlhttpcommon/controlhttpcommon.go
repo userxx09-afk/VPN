@@ -7,9 +7,9 @@ package controlhttpcommon
 
 // UpgradeHeader is the value of the Upgrade HTTP header used to
 // indicate the TapperVPN control protocol.
-const UpgradeHeaderValue = "tappervpn-control-protocol"
+const UpgradeHeaderValue = "tailscale-control-protocol"
 
 // handshakeHeaderName is the HTTP request header that can
 // optionally contain base64-encoded initial handshake
 // payload, to save an RTT.
-const HandshakeHeaderName = "X-TapperVPN-Handshake"
+const HandshakeHeaderName = "X-Tailscale-Handshake"

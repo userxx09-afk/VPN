@@ -39,7 +39,7 @@ const (
 	// This mixing verifies that both clients agree that they're
 	// executing the control protocol at a specific version that
 	// matches the advertised version in the cleartext packet header.
-	protocolVersionPrefix = "TapperVPN Control Protocol v"
+	protocolVersionPrefix = "Tailscale Control Protocol v"
 	invalidNonce          = ^uint64(0)
 )
 

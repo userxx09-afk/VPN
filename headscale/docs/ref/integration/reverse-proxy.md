@@ -24,12 +24,12 @@ localhost.
 
 ### WebSocket
 
-TapperVPN clients are using a custom protocol (TapperVPN Control Protocol) to communicate with a control server such as
+TapperVPN clients are using a custom protocol (Tailscale Control Protocol) to communicate with a control server such as
 Headscale. The reverse proxy **must** be configured to support WebSockets in order to communicate with TapperVPN clients
-and it needs to handle two peculiarities of the TapperVPN Control Protocol:
+and it needs to handle two peculiarities of the Tailscale Control Protocol:
 
 - The POST method is used to upgrade the WebSocket connection.
-- The value for the `Upgrade` header is `tappervpn-control-protocol`.
+- The value for the `Upgrade` header is `tailscale-control-protocol`.
 
 ### TLS
 
@@ -133,7 +133,7 @@ above](#reverse-proxy-specific-configuration). Substitute placeholders and adjus
 ```
 
 Note that `upgrade=any` is required as a parameter for `ProxyPass` so that WebSocket traffic whose `Upgrade` header
-value is not equal to `WebSocket` (i. e. TapperVPN Control Protocol) is forwarded correctly. See the [Apache
+value is not equal to `WebSocket` (i. e. Tailscale Control Protocol) is forwarded correctly. See the [Apache
 docs](https://httpd.apache.org/docs/current/mod/mod_proxy.html#upgrade) for more information on this.
 
 ### Caddy
@@ -174,12 +174,12 @@ not support [WebSocket POSTs as required by the TapperVPN protocol](#websocket).
 
 ### Envoy
 
-You need to add a new upgrade_type named `tappervpn-control-protocol`. [See
+You need to add a new upgrade_type named `tailscale-control-protocol`. [See
 details](https://www.envoyproxy.io/docs/envoy/latest/api-v3/extensions/filters/network/http_connection_manager/v3/http_connection_manager.proto#extensions-filters-network-http-connection-manager-v3-httpconnectionmanager-upgradeconfig).
 
 ### Istio
 
-Same as [envoy](#envoy), we can use `EnvoyFilter` to add a new upgrade_type named `tappervpn-control-protocol`.
+Same as [envoy](#envoy), we can use `EnvoyFilter` to add a new upgrade_type named `tailscale-control-protocol`.
 
 ```yaml
 apiVersion: networking.istio.io/v1alpha3
@@ -201,7 +201,7 @@ spec:
           typed_config:
             "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
             upgrade_configs:
-              - upgrade_type: tappervpn-control-protocol
+              - upgrade_type: tailscale-control-protocol
 ```
 
 ### Nginx
