@@ -40,7 +40,6 @@ import com.tappervpn.ipn.ui.theme.link
 import com.tappervpn.ipn.ui.theme.listItem
 import com.tappervpn.ipn.ui.util.AndroidTVUtil
 import com.tappervpn.ipn.ui.util.AndroidTVUtil.isAndroidTV
-import com.tappervpn.ipn.ui.util.AppVersion
 import com.tappervpn.ipn.ui.util.Lists
 import com.tappervpn.ipn.ui.util.set
 import com.tappervpn.ipn.ui.viewModel.AppViewModel
@@ -166,7 +165,7 @@ fun SettingsView(
       Lists.ItemDivider()
       Setting.Text(
           R.string.about_tappervpn,
-          subtitle = "${stringResource(id = R.string.version)} ${AppVersion.Short()}",
+          subtitle = "${stringResource(id = R.string.version)} ${BuildConfig.TAPPERVPN_VERSION}",
           onClick = settingsNav.onNavigateToAbout,
       )
 

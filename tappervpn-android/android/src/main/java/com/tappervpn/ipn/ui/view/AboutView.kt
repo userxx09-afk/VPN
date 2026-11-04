@@ -3,7 +3,7 @@
 
 package com.tappervpn.ipn.ui.view
 
-import androidx.compose.foundation.background
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -22,7 +23,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -32,8 +35,6 @@ import androidx.compose.ui.unit.dp
 import com.tappervpn.ipn.BuildConfig
 import com.tappervpn.ipn.R
 import com.tappervpn.ipn.ui.Links
-import com.tappervpn.ipn.ui.theme.logoBackground
-import com.tappervpn.ipn.ui.util.AppVersion
 
 @Composable
 fun AboutView(backToSettings: BackNavigation) {
@@ -51,15 +52,7 @@ fun AboutView(backToSettings: BackNavigation) {
                 .padding(innerPadding)
                 .verticalScroll(rememberScrollState()),
     ) {
-      TapperVPNLogoView(
-          usesOnBackgroundColors = true,
-          modifier =
-              Modifier.width(100.dp)
-                  .height(100.dp)
-                  .clip(RoundedCornerShape(50))
-                  .background(MaterialTheme.colorScheme.logoBackground)
-                  .padding(25.dp),
-      )
+      TapperVPNLogoView(modifier = Modifier.width(100.dp).height(100.dp))
 
       Column(
           verticalArrangement =
@@ -79,18 +72,36 @@ fun AboutView(backToSettings: BackNavigation) {
                   // This may be useful for debugging purposes...
                   localClipboardManager.setText(AnnotatedString(BuildConfig.VERSION_NAME))
                 },
-            // ... but we always display the short version in the UI to avoid user
-            // confusion.
-            text = "${stringResource(R.string.version)} ${AppVersion.Short()}",
+            // ... but we always display the TapperVPN release version (the one
+            // updates are numbered by) in the UI to avoid user confusion.
+            text = "${stringResource(R.string.version)} ${BuildConfig.TAPPERVPN_VERSION}",
             fontWeight = MaterialTheme.typography.bodyMedium.fontWeight,
             fontSize = MaterialTheme.typography.bodyMedium.fontSize,
         )
       }
 
+      // The photo the logo comes from.
+      Column(
+          verticalArrangement = Arrangement.spacedBy(8.dp),
+          horizontalAlignment = Alignment.CenterHorizontally,
+          modifier = Modifier.padding(horizontal = 24.dp),
+      ) {
+        Image(
+            painter = painterResource(R.drawable.about_photo_june_1983),
+            contentDescription = stringResource(R.string.about_photo_description),
+            contentScale = ContentScale.FillWidth,
+            modifier = Modifier.fillMaxWidth().widthIn(max = 480.dp).clip(RoundedCornerShape(8.dp)),
+        )
+        Text(
+            stringResource(R.string.about_photo_caption),
+            fontSize = MaterialTheme.typography.bodySmall.fontSize,
+            textAlign = TextAlign.Center,
+        )
+      }
+
       Column(horizontalAlignment = Alignment.CenterHorizontally) {
         OpenURLButton(stringResource(R.string.acknowledgements), Links.LICENSES_URL)
-        OpenURLButton(stringResource(R.string.privacy_policy), Links.PRIVACY_POLICY_URL)
-        OpenURLButton(stringResource(R.string.terms_of_service), Links.TERMS_URL)
+        OpenURLButton(stringResource(R.string.source_code), Links.SOURCE_CODE_URL)
       }
 
       Text(

@@ -35,9 +35,10 @@
     <string name="version">Version</string>
     <string name="about_view_header">About TapperVPN</string>
     <string name="about_view_title">TapperVPN for Android</string>
+    <string name="about_photo_caption">June 1983. The green “Gates →” sign at the airport became the TapperVPN logo.</string>
+    <string name="about_photo_description">Photo from June 1983: three people in wicker chairs at an airport, with a green Gates sign in the background.</string>
+    <string name="source_code">Source code</string>
     <string name="acknowledgements">Acknowledgements</string>
-    <string name="privacy_policy">Privacy Policy</string>
-    <string name="terms_of_service">Terms of Service</string>
     <string name="about_view_footnotes">WireGuard is a registered trademark of Jason A. Donenfeld.\n\nTapperVPN is built on open-source software by Tailscale Inc. and contributors (BSD-3-Clause). Tailscale is a trademark of Tailscale Inc.</string>
     <string name="managed_by">Managed by</string>
 

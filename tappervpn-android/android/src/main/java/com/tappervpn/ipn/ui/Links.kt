@@ -13,6 +13,7 @@ object Links {
   const val DOCS_URL = "https://tailscale.com/kb/"
   const val START_GUIDE_URL = "https://tailscale.com/kb/1017/install/"
   const val LICENSES_URL = "https://tailscale.com/licenses/android"
+  const val SOURCE_CODE_URL = "https://github.com/userxx09-afk/VPN"
   const val DELETE_ACCOUNT_URL =
       "https://login.tailscale.com/login?next_url=%2Fadmin%2Fsettings%2Fgeneral"
   const val TAILNET_LOCK_KB_URL = "https://tailscale.com/kb/1226/tailnet-lock/"
