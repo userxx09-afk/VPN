@@ -16,7 +16,7 @@ $app = Join-Path $root "tappervpn-android"
 
 # --- Toolchain locations ---------------------------------------------------
 if (-not $env:JAVA_HOME) {
-    $jdk = Get-ChildItem "C:\Program Files\Microsoft" -Directory -Filter "jdk-17*" -ErrorAction SilentlyContinue |
+    $jdk = Get-ChildItem "C:\Program Files\Microsoft", "C:\Program Files\Eclipse Adoptium" -Directory -Filter "jdk-17*" -ErrorAction SilentlyContinue |
         Sort-Object Name -Descending | Select-Object -First 1
     if (-not $jdk) { throw "JDK 17 not found. Install it: winget install Microsoft.OpenJDK.17" }
     $env:JAVA_HOME = $jdk.FullName

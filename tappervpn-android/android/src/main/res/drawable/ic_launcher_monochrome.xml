@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Themed-icon version of the logo: just the "T →". -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+  <path
+      android:pathData="M33,48h12M39,48v13"
+      android:strokeColor="#FFFFFF"
+      android:strokeWidth="4"
+      android:strokeLineCap="square"/>
+  <path
+      android:pathData="M50,54h23M65.5,46.5L73,54L65.5,61.5"
+      android:strokeColor="#FFFFFF"
+      android:strokeWidth="4"
+      android:strokeLineCap="round"
+      android:strokeLineJoin="round"/>
+</vector>

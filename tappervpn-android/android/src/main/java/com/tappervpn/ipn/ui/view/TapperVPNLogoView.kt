@@ -1,155 +1,84 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) TapperVPN contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 package com.tappervpn.ipn.ui.view
 
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.BoxWithConstraints
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.size
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import com.tappervpn.ipn.ui.theme.onBackgroundLogoDotDisabled
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.Stroke
 import com.tappervpn.ipn.ui.theme.onBackgroundLogoDotEnabled
-import com.tappervpn.ipn.ui.theme.standaloneLogoDotDisabled
-import com.tappervpn.ipn.ui.theme.standaloneLogoDotEnabled
-import com.tappervpn.ipn.ui.util.set
-import kotlin.concurrent.timer
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
 
-// DotsMatrix represents the state of the progress indicator.
-typealias DotsMatrix = List<List<Boolean>>
+// The TapperVPN logo: a green "T →" gate sign on dark brown, after the
+// "Gates →" sign in the family photo it's based on. Exit nodes are gateways.
+val LogoBrown = Color(0xFF3A2418)
+val LogoPlate = Color(0xFF1F1410)
+val LogoPlateEdge = Color(0xFF5A3A28)
+val LogoGreen = Color(0xFF7FE0A8)
 
-// The initial DotsMatrix that represents the TapperVPN logo (T-shaped).
-val logoDotsMatrix: DotsMatrix =
-    listOf(
-        listOf(false, false, false),
-        listOf(true, true, true),
-        listOf(false, true, false),
-    )
-
+/**
+ * Draws the logo in [modifier]'s (square) bounds. [animated] slides the arrow forward, for
+ * loading states. [usesOnBackgroundColors] draws only the "T →" in the theme's on-background
+ * color, for placing the logo on a colored surface.
+ */
 @Composable
 fun TapperVPNLogoView(
     animated: Boolean = false,
     usesOnBackgroundColors: Boolean = false,
     modifier: Modifier,
 ) {
-
-  val primaryColor: Color =
-      if (usesOnBackgroundColors) {
-        MaterialTheme.colorScheme.onBackgroundLogoDotEnabled
+  val ink = if (usesOnBackgroundColors) MaterialTheme.colorScheme.onBackgroundLogoDotEnabled else LogoGreen
+  val shift =
+      if (animated) {
+        rememberInfiniteTransition(label = "logo")
+            .animateFloat(
+                initialValue = -0.06f,
+                targetValue = 0.06f,
+                animationSpec = infiniteRepeatable(tween(600, easing = LinearEasing), RepeatMode.Reverse),
+                label = "arrow")
+            .value
       } else {
-        MaterialTheme.colorScheme.standaloneLogoDotEnabled
-      }
-  val secondaryColor: Color =
-      if (usesOnBackgroundColors) {
-        MaterialTheme.colorScheme.onBackgroundLogoDotDisabled
-      } else {
-        MaterialTheme.colorScheme.standaloneLogoDotDisabled
+        0f
       }
 
-  val currentDotsMatrix: StateFlow<DotsMatrix> = MutableStateFlow(logoDotsMatrix)
-  var currentDotsMatrixIndex = 0
-  fun advanceToNextMatrix() {
-    currentDotsMatrixIndex = (currentDotsMatrixIndex + 1) % gameOfLife.size
-    val newMatrix =
-        if (animated) {
-          gameOfLife[currentDotsMatrixIndex]
-        } else {
-          logoDotsMatrix
-        }
-    currentDotsMatrix.set(newMatrix)
-  }
-
-  if (animated) {
-    timer(period = 300L) { advanceToNextMatrix() }
-  }
-
-  @Composable
-  fun EnabledDot(modifier: Modifier) {
-    Canvas(modifier = modifier, onDraw = { drawCircle(primaryColor) })
-  }
-
-  @Composable
-  fun DisabledDot(modifier: Modifier) {
-    Canvas(modifier = modifier, onDraw = { drawCircle(secondaryColor) })
-  }
-
-  BoxWithConstraints(modifier) {
-    val currentMatrix = currentDotsMatrix.collectAsState().value
-    Column(verticalArrangement = Arrangement.spacedBy(this@BoxWithConstraints.maxWidth.div(8))) {
-      for (y in 0..2) {
-        Row(horizontalArrangement = Arrangement.spacedBy(this@BoxWithConstraints.maxWidth.div(8))) {
-          for (x in 0..2) {
-            if (currentMatrix[y][x]) {
-              EnabledDot(Modifier.size(this@BoxWithConstraints.maxWidth.div(4)))
-            } else {
-              DisabledDot(Modifier.size(this@BoxWithConstraints.maxWidth.div(4)))
-            }
-          }
-        }
-      }
+  Canvas(modifier = modifier) {
+    val s = size.minDimension
+    if (!usesOnBackgroundColors) {
+      drawRoundRect(LogoBrown, size = Size(s, s), cornerRadius = CornerRadius(s * 0.22f))
+      val plateTop = Offset(s * 0.17f, s * 0.35f)
+      val plateSize = Size(s * 0.66f, s * 0.30f)
+      drawRoundRect(LogoPlate, plateTop, plateSize, CornerRadius(s * 0.04f))
+      drawRoundRect(
+          LogoPlateEdge, plateTop, plateSize, CornerRadius(s * 0.04f), style = Stroke(s * 0.014f))
     }
+    drawSign(s, ink, shift)
   }
 }
 
-val gameOfLife: List<DotsMatrix> =
-    listOf(
-        listOf(
-            listOf(false, true, true),
-            listOf(true, false, true),
-            listOf(false, false, true),
-        ),
-        listOf(
-            listOf(false, true, true),
-            listOf(false, false, true),
-            listOf(false, true, false),
-        ),
-        listOf(
-            listOf(false, true, true),
-            listOf(false, false, false),
-            listOf(false, false, true),
-        ),
-        listOf(
-            listOf(false, false, true),
-            listOf(false, true, false),
-            listOf(false, false, false),
-        ),
-        listOf(
-            listOf(false, true, false),
-            listOf(false, false, false),
-            listOf(false, false, false),
-        ),
-        listOf(
-            listOf(false, false, false),
-            listOf(false, false, true),
-            listOf(false, false, false),
-        ),
-        listOf(
-            listOf(false, false, false),
-            listOf(false, false, false),
-            listOf(false, false, false),
-        ),
-        listOf(
-            listOf(false, false, true),
-            listOf(false, false, false),
-            listOf(false, false, false),
-        ),
-        listOf(
-            listOf(false, false, false),
-            listOf(false, false, false),
-            listOf(true, false, false),
-        ),
-        listOf(listOf(false, false, false), listOf(false, false, false), listOf(true, true, false)),
-        listOf(listOf(false, false, false), listOf(true, false, false), listOf(true, true, false)),
-        listOf(listOf(false, false, false), listOf(true, true, false), listOf(false, true, false)),
-        listOf(listOf(false, false, false), listOf(true, true, false), listOf(false, true, true)),
-        listOf(listOf(false, false, false), listOf(true, true, true), listOf(false, false, true)),
-        listOf(listOf(false, true, false), listOf(true, true, true), listOf(true, false, true)),
-    )
+private fun DrawScope.drawSign(s: Float, ink: Color, shift: Float) {
+  val w = s * 0.046f
+  // "T"
+  drawLine(ink, Offset(s * 0.25f, s * 0.425f), Offset(s * 0.39f, s * 0.425f), w, StrokeCap.Square)
+  drawLine(ink, Offset(s * 0.32f, s * 0.425f), Offset(s * 0.32f, s * 0.585f), w, StrokeCap.Square)
+  // "→"
+  val y = s * 0.5f
+  val x0 = s * (0.45f + shift)
+  val x1 = s * (0.72f + shift)
+  val head = s * 0.085f
+  drawLine(ink, Offset(x0, y), Offset(x1, y), w, StrokeCap.Round)
+  drawLine(ink, Offset(x1 - head, y - head), Offset(x1, y), w, StrokeCap.Round)
+  drawLine(ink, Offset(x1 - head, y + head), Offset(x1, y), w, StrokeCap.Round)
+}

@@ -122,7 +122,7 @@ installed one.
 1. **Own UI**: Windows tray app for choosing the gateway and app list.
 2. **macOS**: `NETransparentProxyProvider` system extension.
 3. **iOS**: full-tunnel or domain-based only. Per-app VPN needs MDM; iOS cannot be a gateway.
-4. **Logo**: replace the Tailscale icons still used by the Android app and the web client.
+4. **Logo in the web client**: its icons come from Tailscale's prebuilt web UI package; building our own web UI would let it use the TapperVPN logo too.
 
 ## Known quirks
 
