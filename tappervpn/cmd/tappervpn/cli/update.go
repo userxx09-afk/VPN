@@ -95,7 +95,7 @@ func runUpdate(ctx context.Context, args []string) error {
 		Confirm: confirmUpdate,
 	})
 	if errors.Is(err, errors.ErrUnsupported) {
-		return errors.New("The 'update' command is not supported on this platform; see https://tailscale.com/s/client-updates")
+		return errors.New("TapperVPN updates itself daily from GitHub. To update now, run tappervpn-updater (as Administrator or root).")
 	}
 	return err
 }
