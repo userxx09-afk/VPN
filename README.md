@@ -126,9 +126,6 @@ installed one.
 
 ## Known quirks
 
-- `headscale/hscontrol/testdata/apiv1_golden/` has one fixture whose name
-  contains `>`, which Windows can't create. It is in the repo but missing from a
-  Windows checkout, so that one test only passes on Linux.
 - On Windows, many headscale tests report "TempDir RemoveAll cleanup ... being
   used by another process": SQLite still holds the test database open. The
   tests themselves pass; run them on Linux for a clean result.

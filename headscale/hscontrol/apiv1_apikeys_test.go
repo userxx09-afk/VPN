@@ -184,7 +184,9 @@ func TestAPIV1ApiKeyDelete(t *testing.T) {
 		assert.JSONEq(t, `{"apiKeys":[]}`, string(listRes.body))
 	})
 
-	t.Run("path prefix with id query is both -> 400 parity", func(t *testing.T) {
+	// TapperVPN: upstream calls this "... both -> 400 parity"; a ">" in the
+	// golden file's name stops the repo from checking out on Windows.
+	t.Run("path prefix with id query is both gives 400 parity", func(t *testing.T) {
 		h := newAPIV1Harness(t)
 		id, prefix := seedAPIKey(t, h.app)
 		res := h.assertParity(t, http.MethodDelete,
