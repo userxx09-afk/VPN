@@ -1,0 +1,3 @@
+#!/bin/rc
+# Plan 9 cmd/tappervpn wrapper script to run cmd/tappervpnd's embedded CLI.
+TS_BE_CLI=1 tappervpnd $*

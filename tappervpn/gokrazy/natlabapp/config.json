@@ -1,0 +1,33 @@
+{
+    "Hostname": "natlabapp",
+    "Update": {
+        "NoPassword": true
+    },
+    "SerialConsole": "ttyS0,115200",
+    "GokrazyPackages": [
+        "github.com/gokrazy/gokrazy/cmd/dhcp"
+    ],
+    "Packages": [
+        "github.com/gokrazy/serial-busybox",
+        "tappervpn.com/cmd/tappervpn",
+        "tappervpn.com/cmd/tappervpnd",
+        "tappervpn.com/cmd/tta"
+    ],
+    "PackageConfig": {
+        "tappervpn.com/cmd/tappervpn": {
+            "ExtraFilePaths": {
+                "/usr": "usr-dir"
+            }
+        }
+    },
+    "Environment": [
+        "GOOS=linux",
+        "GOARCH=amd64"
+    ],
+    "KernelPackage": "github.com/gokrazy/kernel.amd64",
+    "FirmwarePackage": "",
+    "EEPROMPackage": "",
+    "InternalCompatibilityFlags": {
+        "InitImportPath": "github.com/tailscale/ts-gokrazy/gokrazyinit"
+    }
+}

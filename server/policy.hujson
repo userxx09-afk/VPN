@@ -1,4 +1,4 @@
-// Headscale policy for the meshwall test network.
+// Headscale policy for the TapperVPN network.
 {
   // Everyone in the tailnet can reach everyone (same as having no policy).
   "acls": [

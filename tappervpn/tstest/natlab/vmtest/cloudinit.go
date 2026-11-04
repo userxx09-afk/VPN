@@ -1,0 +1,488 @@
+// Copyright (c) Tailscale Inc & contributors
+// SPDX-License-Identifier: BSD-3-Clause
+
+package vmtest
+
+import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/pem"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+
+	"github.com/creachadair/mds/shell"
+	"github.com/kdomanski/iso9660"
+	"golang.org/x/crypto/ssh"
+	"tappervpn.com/tstest/natlab/vnet"
+)
+
+// createCloudInitISO creates a cidata seed ISO for the given cloud VM node.
+// For Linux VMs, the ISO contains meta-data, user-data, and network-config.
+// For FreeBSD VMs, the ISO contains meta-data and user-data only (nuageinit
+// doesn't use netplan-style network-config; DHCP is enabled in rc.conf).
+func (e *Env) createCloudInitISO(n *Node) (string, error) {
+	metaData := fmt.Sprintf("instance-id: %s\nlocal-hostname: %s\n", n.name, n.name)
+	if err := ensureDebugSSHKey(); err != nil {
+		return "", err
+	}
+	userData := e.generateUserData(n)
+
+	files := map[string]string{
+		"meta-data": metaData,
+		"user-data": userData,
+	}
+
+	// Linux cloud-init needs network-config to configure interfaces before
+	// systemd-networkd-wait-online blocks boot.
+	if n.os.GOOS() == "linux" {
+		files["network-config"] = `version: 2
+ethernets:
+  primary:
+    match:
+      macaddress: "` + n.vnetNode.NICMac(0).String() + `"
+    dhcp4: true
+    dhcp4-overrides:
+      route-metric: 100
+    optional: true
+  secondary:
+    match:
+      name: "en*"
+    dhcp4: true
+    dhcp4-overrides:
+      route-metric: 200
+    optional: true
+`
+	}
+
+	iw, err := iso9660.NewWriter()
+	if err != nil {
+		return "", fmt.Errorf("creating ISO writer: %w", err)
+	}
+	defer iw.Cleanup()
+
+	for name, content := range files {
+		if err := iw.AddFile(strings.NewReader(content), name); err != nil {
+			return "", fmt.Errorf("adding %s to ISO: %w", name, err)
+		}
+	}
+
+	isoPath := filepath.Join(e.tempDir, n.name+"-seed.iso")
+	f, err := os.Create(isoPath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	if err := iw.WriteTo(f, "cidata"); err != nil {
+		return "", fmt.Errorf("writing seed ISO: %w", err)
+	}
+	return isoPath, nil
+}
+
+// generateUserData creates the cloud-init user-data (#cloud-config) for a node.
+func (e *Env) generateUserData(n *Node) string {
+	switch n.os.GOOS() {
+	case "linux":
+		return e.generateLinuxUserData(n)
+	case "freebsd":
+		return e.generateFreeBSDUserData(n)
+	default:
+		panic(fmt.Sprintf("unsupported GOOS %q for cloud-init user-data", n.os.GOOS()))
+	}
+}
+
+// generateLinuxUserData creates Linux cloud-init user-data (#cloud-config) for a node.
+func (e *Env) generateLinuxUserData(n *Node) string {
+	var ud strings.Builder
+	ud.WriteString("#cloud-config\n")
+
+	// Enable root SSH login for debugging via the debug NIC.
+	ud.WriteString("ssh_pwauth: true\n")
+	ud.WriteString("disable_root: false\n")
+	ud.WriteString("users:\n")
+	ud.WriteString("  - name: root\n")
+	ud.WriteString("    lock_passwd: false\n")
+	ud.WriteString("    plain_text_passwd: root\n")
+	// Also inject the host's SSH key if available.
+	if pubkey, err := os.ReadFile("/tmp/vmtest_key.pub"); err == nil {
+		ud.WriteString(fmt.Sprintf("    ssh_authorized_keys:\n      - %s\n", strings.TrimSpace(string(pubkey))))
+	}
+
+	var files []cloudInitFile
+	if n.systemdUnit {
+		files = append(files, e.systemdUnitFiles(n)...)
+	}
+	if n.dnsMode == DNSOpenresolv {
+		orFiles, err := buildOpenresolv()
+		if err != nil {
+			e.t.Fatalf("building openresolv for the guest: %v", err)
+		}
+		files = append(files, orFiles...)
+	}
+	if n.dhcpClient == DHCPClientDhcpcd {
+		files = append(files, dhcpcdFiles(n)...)
+	}
+	writeCloudInitFiles(&ud, files)
+
+	ud.WriteString("runcmd:\n")
+
+	// Remove the default route (added by the debug NIC) so traffic goes through vnet.
+	// The debug NIC is only for SSH access from the host.
+	ud.WriteString("  - [\"/bin/sh\", \"-c\", \"ip route del default via 10.0.2.2 2>/dev/null || true\"]\n")
+
+	// Provision the requested DNS backend before anything registers DNS
+	// state: dhcpcd's resolv.conf hook runs as soon as it has a lease.
+	writeLinuxDNSModeSetup(&ud, n.dnsMode)
+
+	// With a non-default DHCP client, the vnet NIC has no address until that
+	// client runs, and the downloads below need one.
+	writeLinuxDHCPClientSetup(&ud, n)
+
+	// Download binaries from the files.tappervpn VIP (52.52.0.6).
+	// Use the IP directly to avoid DNS resolution issues during early boot.
+	binDir := n.os.GOOS() + "_" + n.os.GOARCH()
+	for _, bin := range []string{"tappervpnd", "tappervpn", "tta"} {
+		fmt.Fprintf(&ud, "  - [\"/bin/sh\", \"-c\", \"curl -v --retry 10 --retry-delay 2 --retry-all-errors -o /usr/local/bin/%s http://52.52.0.6/%s/%s 2>&1\"]\n", bin, binDir, bin)
+	}
+	ud.WriteString("  - [\"chmod\", \"+x\", \"/usr/local/bin/tappervpnd\", \"/usr/local/bin/tappervpn\", \"/usr/local/bin/tta\"]\n")
+
+	// Apply the bin_t label for SELinux enforcement: we curl the binaries in
+	// rather than installing a package, so nothing else labels them, and
+	// enforcing mode would deny exec. No-op on non-SELinux systems, but only
+	// RHEL-family images ship restorecon.
+	if n.os.Family == LinuxRHEL {
+		ud.WriteString("  - [\"/bin/sh\", \"-c\", \"restorecon -v /usr/local/bin/tappervpnd /usr/local/bin/tappervpn /usr/local/bin/tta 2>&1 || true\"]\n")
+	}
+
+	// Enable IP forwarding for subnet routers.
+	if n.advertiseRoutes != "" {
+		ud.WriteString("  - [\"sysctl\", \"-w\", \"net.ipv4.ip_forward=1\"]\n")
+		ud.WriteString("  - [\"sysctl\", \"-w\", \"net.ipv6.conf.all.forwarding=1\"]\n")
+	}
+
+	// Start tappervpnd, either via the stock systemd unit or directly in
+	// the background. --statedir provides a VarRoot so features like
+	// Taildrop (which needs a place to stash incoming files) have a
+	// directory to work with.
+	if n.systemdUnit {
+		// The unit's ExecStart runs /usr/sbin/tappervpnd.
+		ud.WriteString("  - [\"cp\", \"/usr/local/bin/tappervpnd\", \"/usr/sbin/tappervpnd\"]\n")
+		ud.WriteString("  - [\"systemctl\", \"daemon-reload\"]\n")
+		// Type=notify makes this block until tappervpnd reports readiness.
+		ud.WriteString("  - [\"systemctl\", \"start\", \"tappervpnd.service\"]\n")
+	} else {
+		ud.WriteString("  - [\"mkdir\", \"-p\", \"/var/lib/tappervpn\"]\n")
+		fmt.Fprintf(&ud, "  - [\"/bin/sh\", \"-c\", \"%s/usr/local/bin/tappervpnd --state=mem: --statedir=/var/lib/tappervpn &\"]\n", tappervpndEnvPrefix(n))
+		ud.WriteString("  - [\"sleep\", \"2\"]\n")
+	}
+
+	// Start tta (TapperVPN Test Agent).
+	ud.WriteString("  - [\"/bin/sh\", \"-c\", \"/usr/local/bin/tta &\"]\n")
+
+	return ud.String()
+}
+
+// writeLinuxDNSModeSetup appends cloud-init runcmd entries that provision the
+// guest so tappervpnd selects the requested DNS backend. Must run before the
+// tappervpnd launch entries. The zero value (DNSDefault) is a no-op. mode is
+// validated in AddNode, so any other unknown value is a bug and panics.
+func writeLinuxDNSModeSetup(ud *strings.Builder, mode DNSMode) {
+	switch mode {
+	default:
+		// AddNode validates the mode, so an unknown value here is a bug.
+		panic(fmt.Sprintf("unhandled DNSMode %q", mode))
+	case DNSDefault:
+		// The empty/zero value: leave the image's DNS config alone, so
+		// systemd-resolved stays enabled and tappervpnd selects it (or
+		// whatever the image runs by default). No-op.
+	case DNSDirect:
+		// Mask systemd-resolved and drop a plain resolv.conf so dnsMode() in
+		// net/dns/manager_linux.go falls through to "direct". Point it at
+		// natlab's fake DNS VIP (not a public resolver): it's the only resolver
+		// reachable in vnet and it serves the internal *.tappervpn names.
+		fmt.Fprintf(ud, "  - [\"/bin/sh\", \"-c\", \"systemctl disable --now systemd-resolved 2>/dev/null || true\"]\n")
+		fmt.Fprintf(ud, "  - [\"/bin/sh\", \"-c\", \"systemctl mask systemd-resolved 2>/dev/null || true\"]\n")
+		fmt.Fprintf(ud, "  - [\"/bin/sh\", \"-c\", \"rm -f /etc/resolv.conf && printf 'nameserver %s\\\\n' >/etc/resolv.conf\"]\n", vnet.FakeDNSIPv4())
+	case DNSOpenresolv:
+		// Mask systemd-resolved, so that resolvconfStyle() in
+		// net/dns/resolvconf.go finds a resolvconf that is not Debian's.
+		// dnsMode() then selects the "openresolv" manager. openresolv's own
+		// files are installed by write_files; see buildOpenresolv.
+		fmt.Fprintf(ud, "  - [\"/bin/sh\", \"-c\", \"systemctl disable --now systemd-resolved 2>/dev/null || true\"]\n")
+		fmt.Fprintf(ud, "  - [\"/bin/sh\", \"-c\", \"systemctl mask systemd-resolved 2>/dev/null || true\"]\n")
+		// Create resolvconf's key directory, empty. Left alone, resolvconf
+		// would not create it until the first snippet was registered, and a
+		// missing directory makes "resolvconf -l" exit 0 instead of 2. Only an
+		// existing empty directory produces the state [DNSOpenresolv]
+		// describes. write_files cannot create this one, because it creates a
+		// directory only as a side effect of writing a file into it.
+		fmt.Fprintf(ud, "  - [\"mkdir\", \"-p\", \"%s\"]\n", openresolvKeyDir)
+		// The signature line is required verbatim: openresolv's libc
+		// subscriber refuses to overwrite a resolv.conf that lacks it, and
+		// resolvOwner() in net/dns/direct.go needs "resolvconf" in the leading
+		// comments for dnsMode() to take its resolvconf branch. The nameserver
+		// keeps the guest resolving until tappervpnd takes over.
+		fmt.Fprintf(ud, "  - [\"/bin/sh\", \"-c\", \"rm -f /etc/resolv.conf && printf '# Generated by resolvconf\\\\nnameserver %s\\\\n' >/etc/resolv.conf\"]\n", vnet.FakeDNSIPv4())
+	}
+}
+
+// VnetNICName is the name of a Linux cloud guest's first vnet NIC. QEMU
+// attaches the vnet NICs before the debug NIC, so the first lands in PCI
+// slot 3; see qemu.go. The debug NIC is enp0s4.
+const VnetNICName = "enp0s3"
+
+// dhcpcdFiles returns the files that hand the vnet NIC from systemd-networkd
+// to dhcpcd. See [DHCPClientDhcpcd].
+func dhcpcdFiles(n *Node) []cloudInitFile {
+	return []cloudInitFile{
+		{
+			// cloud-init writes this in its init-local stage, which systemd
+			// orders before network-pre.target and so before networkd starts,
+			// and it sorts before netplan's generated 10-netplan-*.network
+			// files. networkd therefore never configures this link. Leaving
+			// the netplan config alone is not enough: its "en*" match would
+			// still claim the NIC.
+			path: "/etc/systemd/network/05-natlab-dhcpcd.network",
+			content: fmt.Appendf(nil, `[Match]
+MACAddress=%s
+[Link]
+Unmanaged=yes
+`, n.vnetNode.NICMac(0)),
+			mode: "0644",
+		},
+		{
+			// Replaces the stock file. The first five lines are the stock
+			// defaults that matter here. vnet has no IPv6 on these networks
+			// and no hostname option; noarp skips the 5s address probe.
+			path: "/etc/dhcpcd.conf",
+			content: fmt.Appendf(nil, `duid
+persistent
+option domain_name_servers, domain_name, domain_search
+option classless_static_routes
+require dhcp_server_identifier
+allowinterfaces %s
+ipv4only
+noipv4ll
+noarp
+nohook hostname
+`, VnetNICName),
+			mode: "0644",
+		},
+	}
+}
+
+// writeLinuxDHCPClientSetup appends the runcmd entries that start the
+// requested DHCP client on the vnet NIC. It must come before anything that
+// needs the NIC's address. The zero value (DHCPClientDefault) is a no-op.
+func writeLinuxDHCPClientSetup(ud *strings.Builder, n *Node) {
+	switch n.dhcpClient {
+	case DHCPClientDefault:
+		// No additional configuration is required.
+	case DHCPClientDhcpcd:
+		// The .network drop-in selects the NIC by MAC and dhcpcd.conf by
+		// name. Report a mismatch on the console, where the boot log is
+		// collected, rather than letting the downloads below time out.
+		fmt.Fprintf(ud, `  - ["/bin/sh", "-c", "[ \"$(cat /sys/class/net/%[1]s/address 2>/dev/null)\" = %[2]s ] || echo natlab: %[1]s is not the vnet NIC %[2]s >&2"]
+`, VnetNICName, n.vnetNode.NICMac(0))
+		// dhcpcd-base ships no systemd unit. -w waits for the lease before
+		// returning. Its output stays on the console, which is where the
+		// harness looks when a node fails to come up.
+		fmt.Fprintf(ud, "  - [\"dhcpcd\", \"-w\", \"%s\"]\n", VnetNICName)
+	default:
+		// AddNode validates the client, so an unknown value here is a bug.
+		panic(fmt.Sprintf("unhandled DHCPClient %q", n.dhcpClient))
+	}
+}
+
+// generateFreeBSDUserData creates FreeBSD nuageinit user-data (#cloud-config)
+// for a node. FreeBSD's nuageinit supports a subset of cloud-init directives
+// including runcmd, which runs after networking is up.
+//
+// IMPORTANT: nuageinit's runcmd only supports string entries, not the YAML
+// array form that Linux cloud-init supports. Each entry must be a plain string
+// that gets passed to /bin/sh -c.
+func (e *Env) generateFreeBSDUserData(n *Node) string {
+	var ud strings.Builder
+	ud.WriteString("#cloud-config\n")
+	ud.WriteString("ssh_pwauth: true\n")
+
+	ud.WriteString("runcmd:\n")
+
+	// Enable root SSH login for debugging via the debug NIC.
+	ud.WriteString("  - \"echo 'PermitRootLogin yes' >>/etc/ssh/sshd_config\"\n")
+	ud.WriteString("  - \"echo 'PubkeyAuthentication yes' >>/etc/ssh/sshd_config\"\n")
+	// Also inject the host's SSH key if available.
+	if pubkey, err := os.ReadFile("/tmp/vmtest_key.pub"); err == nil {
+		ud.WriteString("  - \"mkdir -p /root/.ssh && chmod 700 /root/.ssh\"\n")
+		fmt.Fprintf(&ud, "  - \"echo '%s' >/root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys\"\n", strings.TrimSpace(string(pubkey)))
+	}
+
+	// /usr/local/bin may not exist on a fresh FreeBSD cloud image (it's
+	// created when the first package is installed).
+	ud.WriteString("  - \"mkdir -p /usr/local/bin\"\n")
+
+	// Remove the default route via the debug NIC's SLIRP gateway so that
+	// traffic goes through the vnet NICs. The debug NIC is only for SSH.
+	ud.WriteString("  - \"route delete default 10.0.2.2 2>/dev/null || true\"\n")
+
+	// Grow the TCP socket buffer limits before the binary downloads
+	// below. FreeBSD's defaults start receive windows at 64 kB and
+	// autoscale in slow 16 kB steps, which caps a transfer at roughly
+	// 64kB per round trip. On an oversubscribed CI runner, where
+	// scheduling delay inflates the effective RTT of the userspace vnet
+	// data path to tens or hundreds of milliseconds, that works out to
+	// a few hundred kB/s and made the multi-megabyte binary fetches (and
+	// so the whole test) time out.
+	ud.WriteString("  - \"sysctl kern.ipc.maxsockbuf=16777216\"\n")
+	ud.WriteString("  - \"sysctl net.inet.tcp.recvspace=4194304\"\n")
+	ud.WriteString("  - \"sysctl net.inet.tcp.sendspace=1048576\"\n")
+	ud.WriteString("  - \"sysctl net.inet.tcp.recvbuf_max=16777216\"\n")
+	ud.WriteString("  - \"sysctl net.inet.tcp.sendbuf_max=16777216\"\n")
+
+	// Download binaries from the files.tappervpn VIP (52.52.0.6).
+	// FreeBSD's fetch(1) is part of the base system (no curl needed).
+	// Retry in a loop since the file server may not be ready immediately.
+	binDir := n.os.GOOS() + "_" + n.os.GOARCH()
+	for _, bin := range []string{"tappervpnd", "tappervpn", "tta"} {
+		fmt.Fprintf(&ud, "  - \"n=0; while [ $n -lt 10 ]; do fetch -o /usr/local/bin/%s http://52.52.0.6/%s/%s && break; n=$((n+1)); sleep 2; done\"\n", bin, binDir, bin)
+	}
+	ud.WriteString("  - \"chmod +x /usr/local/bin/tappervpnd /usr/local/bin/tappervpn /usr/local/bin/tta\"\n")
+
+	// Enable IP forwarding for subnet routers.
+	if n.advertiseRoutes != "" {
+		ud.WriteString("  - \"sysctl net.inet.ip.forwarding=1\"\n")
+		ud.WriteString("  - \"sysctl net.inet6.ip6.forwarding=1\"\n")
+	}
+
+	// Start tappervpnd and tta in the background. Redirect stdio to log
+	// files and away from /dev/null on stdin; otherwise nuageinit's runcmd
+	// executor keeps the backgrounded child's stdout/stderr pipes open and
+	// blocks waiting for them, so subsequent runcmd entries (including the
+	// tta launch below) never run. Linux cloud-init doesn't have this
+	// gotcha. Set PATH to include /usr/local/bin so that tta can find
+	// "tappervpn" (TTA uses exec.Command("tappervpn", ...) without a full
+	// path). --statedir provides a VarRoot so features like Taildrop have a
+	// directory.
+	ud.WriteString("  - \"mkdir -p /var/lib/tappervpn\"\n")
+	fmt.Fprintf(&ud, "  - \"export PATH=/usr/local/bin:$PATH && %s/usr/local/bin/tappervpnd --state=mem: --statedir=/var/lib/tappervpn </dev/null >/var/log/tappervpnd.log 2>&1 &\"\n", tappervpndEnvPrefix(n))
+	ud.WriteString("  - \"sleep 2\"\n")
+
+	// Start tta (TapperVPN Test Agent), with the same stdio redirection.
+	ud.WriteString("  - \"export PATH=/usr/local/bin:$PATH && /usr/local/bin/tta </dev/null >/var/log/tta.log 2>&1 &\"\n")
+
+	return ud.String()
+}
+
+// cloudInitFile is one file cloud-init writes into the guest. cloud-init
+// writes them during its config stage, which runs before the runcmd entries,
+// and it creates any missing parent directories.
+type cloudInitFile struct {
+	path    string
+	content []byte
+	mode    string // octal permissions, e.g. "0755"; empty leaves cloud-init's default
+}
+
+// writeCloudInitFiles appends the write_files section. There can be only one
+// such section per user-data document, so every file a node needs has to be
+// collected before this is called.
+//
+// Contents are base64-encoded to sidestep YAML quoting.
+func writeCloudInitFiles(ud *strings.Builder, files []cloudInitFile) {
+	if len(files) == 0 {
+		return
+	}
+	ud.WriteString("write_files:\n")
+	for _, f := range files {
+		fmt.Fprintf(ud, "  - path: %s\n", f.path)
+		fmt.Fprintf(ud, "    encoding: b64\n")
+		if f.mode != "" {
+			fmt.Fprintf(ud, "    permissions: '%s'\n", f.mode)
+		}
+		fmt.Fprintf(ud, "    content: %s\n", base64.StdEncoding.EncodeToString(f.content))
+	}
+}
+
+// systemdUnitFiles returns the stock tappervpnd systemd unit from the source
+// tree, along with the packaging's /etc/default/tappervpnd EnvironmentFile
+// (plus any per-node TapperVPNdEnv variables).
+func (e *Env) systemdUnitFiles(n *Node) []cloudInitFile {
+	modRoot, err := findModRoot()
+	if err != nil {
+		e.t.Fatalf("finding module root for tappervpnd.service: %v", err)
+	}
+	unit, err := os.ReadFile(filepath.Join(modRoot, "cmd/tappervpnd/tappervpnd.service"))
+	if err != nil {
+		e.t.Fatalf("reading tappervpnd.service: %v", err)
+	}
+	defaults, err := os.ReadFile(filepath.Join(modRoot, "cmd/tappervpnd/tappervpnd.defaults"))
+	if err != nil {
+		e.t.Fatalf("reading tappervpnd.defaults: %v", err)
+	}
+	var envFile strings.Builder
+	envFile.Write(defaults)
+	for _, env := range n.vnetNode.Env() {
+		fmt.Fprintf(&envFile, "%s=%q\n", env.Key, env.Value)
+	}
+
+	return []cloudInitFile{
+		{path: "/etc/systemd/system/tappervpnd.service", content: unit},
+		{path: "/etc/default/tappervpnd", content: []byte(envFile.String())},
+	}
+}
+
+func tappervpndEnvPrefix(n *Node) string {
+	env := n.vnetNode.Env()
+	if len(env) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(env))
+	for _, e := range env {
+		parts = append(parts, e.Key+"="+shell.Quote(e.Value))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, " ") + " "
+}
+
+// debugSSHKeyMu serializes ensureDebugSSHKey calls. Env.Start boots all
+// nodes in parallel and each calls createCloudInitISO -> ensureDebugSSHKey,
+// which would otherwise race on creating /tmp/vmtest_key: one goroutine
+// can observe a newly-created-but-still-empty key file written by another
+// and fail to parse it.
+var debugSSHKeyMu sync.Mutex
+
+func ensureDebugSSHKey() error {
+	debugSSHKeyMu.Lock()
+	defer debugSSHKeyMu.Unlock()
+	const keyPath = "/tmp/vmtest_key"
+	if privPEM, err := os.ReadFile(keyPath); err == nil {
+		if _, err := os.Stat(keyPath + ".pub"); err == nil {
+			return nil
+		}
+		signer, err := ssh.ParsePrivateKey(privPEM)
+		if err != nil {
+			return fmt.Errorf("parse %s: %w", keyPath, err)
+		}
+		return os.WriteFile(keyPath+".pub", ssh.MarshalAuthorizedKey(signer.PublicKey()), 0644)
+	}
+
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return err
+	}
+	block, err := ssh.MarshalPrivateKey(priv, "vmtest")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(block), 0600); err != nil {
+		return err
+	}
+	sshPub, err := ssh.NewPublicKey(pub)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(keyPath+".pub", ssh.MarshalAuthorizedKey(sshPub), 0644)
+}

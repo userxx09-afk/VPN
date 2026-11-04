@@ -1,0 +1,23 @@
+[Unit]
+Description=TapperVPN node agent
+Documentation=https://tailscale.com/docs/
+Wants=network-pre.target
+After=network-pre.target NetworkManager.service systemd-resolved.service
+
+[Service]
+EnvironmentFile=/etc/default/tappervpnd
+ExecStart=/usr/sbin/tappervpnd --state=/var/lib/tappervpn/tappervpnd.state --socket=/run/tappervpn/tappervpnd.sock --port=${PORT} $FLAGS
+ExecStopPost=/usr/sbin/tappervpnd --cleanup
+
+Restart=on-failure
+
+RuntimeDirectory=tappervpn
+RuntimeDirectoryMode=0755
+StateDirectory=tappervpn
+StateDirectoryMode=0700
+CacheDirectory=tappervpn
+CacheDirectoryMode=0750
+Type=notify
+
+[Install]
+WantedBy=multi-user.target

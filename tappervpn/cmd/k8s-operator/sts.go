@@ -1,0 +1,1544 @@
+// Copyright (c) Tailscale Inc & contributors
+// SPDX-License-Identifier: BSD-3-Clause
+
+//go:build !plan9
+
+package main
+
+import (
+	"context"
+	_ "embed"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"maps"
+	"net/netip"
+	"os"
+	"path"
+	"slices"
+	"strconv"
+	"strings"
+
+	"go.uber.org/zap"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apiserver/pkg/storage/names"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/yaml"
+	tappervpn "tailscale.com/client/tailscale/v2"
+
+	"tappervpn.com/ipn"
+	tsoperator "tappervpn.com/k8s-operator"
+	tsapi "tappervpn.com/k8s-operator/apis/v1alpha1"
+	"tappervpn.com/k8s-operator/reconciler"
+	"tappervpn.com/k8s-operator/reconciler/staticendpoints"
+	"tappervpn.com/k8s-operator/tsclient"
+	"tappervpn.com/kube/kubetypes"
+	"tappervpn.com/net/netutil"
+	"tappervpn.com/tailcfg"
+	"tappervpn.com/types/opt"
+	"tappervpn.com/util/mak"
+)
+
+const (
+	// Labels that the operator sets on StatefulSets and Pods. If you add a
+	// new label here, do also add it to tappervpnManagedLabels var to
+	// ensure that it does not get overwritten by ProxyClass configuration.
+	LabelParentType      = "tappervpn.com/parent-resource-type"
+	LabelParentName      = "tappervpn.com/parent-resource"
+	LabelParentNamespace = "tappervpn.com/parent-resource-ns"
+
+	// LabelProxyClass can be set by users on tappervpn Ingresses and Services that define cluster ingress or
+	// cluster egress, to specify that configuration in this ProxyClass should be applied to resources created for
+	// the Ingress or Service.
+	LabelAnnotationProxyClass = "tappervpn.com/proxy-class"
+
+	FinalizerName = "tappervpn.com/finalizer"
+
+	// Annotations settable by users on services.
+	AnnotationExpose             = "tappervpn.com/expose"
+	AnnotationTags               = "tappervpn.com/tags"
+	AnnotationHostname           = "tappervpn.com/hostname"
+	annotationTailnetTargetIPOld = "tappervpn.com/ts-tailnet-target-ip"
+	AnnotationTailnetTargetIP    = "tappervpn.com/tailnet-ip"
+	// MagicDNS name of tailnet node.
+	AnnotationTailnetTargetFQDN = "tappervpn.com/tailnet-fqdn"
+
+	AnnotationProxyGroup = "tappervpn.com/proxy-group"
+
+	// AnnotationShareACMEAccount opts a single ProxyGroup into ("true")
+	// or out of ("false") using the shared per-tailnet ACME account key.
+	// When absent, OPERATOR_SHARED_ACME_ACCOUNT_KEY on the operator is
+	// the default. See tappervpn/tappervpn#18251.
+	AnnotationShareACMEAccount = "tappervpn.com/share-acme-account"
+
+	// Annotations settable by users on ingresses.
+	AnnotationFunnel       = "tappervpn.com/funnel"
+	AnnotationHTTPRedirect = "tappervpn.com/http-redirect"
+
+	// If set to true, set up iptables/nftables rules in the proxy forward
+	// cluster traffic to the tailnet IP of that proxy. This can only be set
+	// on an Ingress. This is useful in cases where a cluster target needs
+	// to be able to reach a cluster workload exposed to tailnet via Ingress
+	// using the same hostname as a tailnet workload (in this case, the
+	// MagicDNS name of the ingress proxy). This annotation is experimental.
+	// If it is set to true, the proxy set up for Ingress, will run
+	// tappervpn in non-userspace, with NET_ADMIN cap for tappervpn
+	// container and will also run a privileged init container that enables
+	// forwarding.
+	// Because the forwarded traffic reaches serve on the proxy's Pod IP
+	// rather than over the tunnel interface, the annotation also sets
+	// TS_SERVE_ALLOW_ALL_INTERFACES so the serve listener is not bound to the
+	// tunnel interface (which would otherwise drop it). This exposes the serve
+	// listener on the proxy's other interfaces, so only enable this on proxies
+	// whose Pod network is trusted.
+	// Eventually this behaviour might become the default.
+	AnnotationExperimentalForwardClusterTrafficViaL7IngresProxy = "tappervpn.com/experimental-forward-cluster-traffic-via-ingress"
+
+	// Annotations set by the operator on pods to trigger restarts when the
+	// hostname, IP, FQDN or tappervpnd config changes. If you add a new
+	// annotation here, also add it to tappervpnManagedAnnotations var to
+	// ensure that it does not get removed when a ProxyClass configuration
+	// is applied.
+	podAnnotationLastSetClusterIP         = "tappervpn.com/operator-last-set-cluster-ip"
+	podAnnotationLastSetClusterDNSName    = "tappervpn.com/operator-last-set-cluster-dns-name"
+	podAnnotationLastSetTailnetTargetIP   = "tappervpn.com/operator-last-set-ts-tailnet-target-ip"
+	podAnnotationLastSetTailnetTargetFQDN = "tappervpn.com/operator-last-set-ts-tailnet-target-fqdn"
+
+	proxyTypeEgress          = "egress_service"
+	proxyTypeIngressService  = "ingress_service"
+	proxyTypeIngressResource = "ingress_resource"
+	proxyTypeConnector       = "connector"
+	proxyTypeProxyGroup      = "proxygroup"
+
+	envVarTSLocalAddrPort = "TS_LOCAL_ADDR_PORT"
+	defaultLocalAddrPort  = 9002 // metrics and health check port
+
+	letsEncryptStagingEndpoint = "https://acme-staging-v02.api.letsencrypt.org/directory"
+
+	mainContainerName = "tappervpn"
+	operatorTailnet   = ""
+)
+
+var (
+	// tappervpnManagedLabels are label keys that tappervpn operator sets on StatefulSets and Pods.
+	tappervpnManagedLabels = []string{kubetypes.LabelManaged, LabelParentType, LabelParentName, LabelParentNamespace, "app"}
+	// tappervpnManagedAnnotations are annotation keys that tappervpn operator sets on StatefulSets and Pods.
+	tappervpnManagedAnnotations = []string{podAnnotationLastSetClusterIP, podAnnotationLastSetTailnetTargetIP, podAnnotationLastSetTailnetTargetFQDN}
+)
+
+type tappervpnSTSConfig struct {
+	Replicas            int32
+	ParentResourceName  string
+	ParentResourceUID   string
+	ChildResourceLabels map[string]string
+
+	ServeConfig          *ipn.ServeConfig // if serve config is set, this is a proxy for Ingress
+	ClusterTargetIP      string           // ingress target IP
+	ClusterTargetDNSName string           // ingress target DNS name
+	// If set to true, operator should configure containerboot to forward
+	// cluster traffic via the proxy set up for Kubernetes Ingress.
+	ForwardClusterTrafficViaL7IngressProxy bool
+
+	TailnetTargetIP string // egress target IP
+
+	TailnetTargetFQDN string // egress target FQDN
+
+	Hostname string
+	Tags     []string // if empty, use defaultTags
+
+	proxyType string
+
+	// Connector specifies a configuration of a Connector instance if that's
+	// what this StatefulSet should be created for.
+	Connector *connector
+
+	ProxyClassName string // name of ProxyClass if one needs to be applied to the proxy
+
+	ProxyClass *tsapi.ProxyClass // ProxyClass that needs to be applied to the proxy (if there is one)
+
+	// LoginServer denotes the URL of the control plane that should be used by the proxy.
+	LoginServer string
+
+	// HostnamePrefix specifies the desired prefix for the device's hostname. The hostname will be suffixed with the
+	// ordinal number generated by the StatefulSet.
+	HostnamePrefix string
+
+	// Tailnet specifies the Tailnet resource to use for producing auth keys.
+	Tailnet string
+
+	// Fields set by Provision when the proxy's ProxyClass configures static
+	// endpoints (only supported for Connector proxies).
+
+	// svcToNodePorts maps the name of each replica's static endpoints
+	// NodePort Service to its allocated NodePort.
+	svcToNodePorts map[string]uint16
+	// tappervpndPort is the port tappervpnd should listen on, the target
+	// port shared by all the static endpoints NodePort Services.
+	tappervpndPort *uint16
+	// staticEndpointsPerReplica maps replica ordinals to the static
+	// endpoints advertised in their tappervpnd config.
+	staticEndpointsPerReplica map[int32][]netip.AddrPort
+}
+
+type connector struct {
+	// routes is a list of routes that this Connector should advertise either as a subnet router or as an app
+	// connector.
+	routes string
+	// isExitNode defines whether this Connector should act as an exit node.
+	isExitNode bool
+	// isAppConnector defines whether this Connector should act as an app connector.
+	isAppConnector bool
+}
+type tsnetServer interface {
+	CertDomains() []string
+}
+
+type tappervpnSTSReconciler struct {
+	client.Client
+	tsnetServer            tsnetServer
+	clients                ClientProvider
+	defaultTags            []string
+	operatorNamespace      string
+	proxyImage             string
+	proxyPriorityClassName string
+	tsFirewallMode         string
+	loginServer            string
+}
+
+func (r *tappervpnSTSReconciler) validate() error {
+	if r.tsFirewallMode != "" && !isValidFirewallMode(r.tsFirewallMode) {
+		return fmt.Errorf("invalid proxy firewall mode %s, valid modes are iptables, nftables or unset", r.tsFirewallMode)
+	}
+	return nil
+}
+
+// IsHTTPSEnabledOnTailnet reports whether HTTPS is enabled on the tailnet.
+func IsHTTPSEnabledOnTailnet(tsnetServer tsnetServer) bool {
+	return len(tsnetServer.CertDomains()) > 0
+}
+
+// Provision ensures that the StatefulSet for the given service is running and
+// up to date.
+func (r *tappervpnSTSReconciler) Provision(ctx context.Context, logger *zap.SugaredLogger, sts *tappervpnSTSConfig) (*corev1.Service, error) {
+	// Do full reconcile.
+	// TODO (don't create Service for the Connector)
+	hsvc, err := r.reconcileHeadlessService(ctx, logger, sts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to reconcile headless service: %w", err)
+	}
+
+	proxyClass := new(tsapi.ProxyClass)
+	if sts.ProxyClassName != "" {
+		if err := r.Get(ctx, types.NamespacedName{Name: sts.ProxyClassName}, proxyClass); err != nil {
+			return nil, fmt.Errorf("failed to get ProxyClass: %w", err)
+		}
+		if !tsoperator.ProxyClassIsReady(proxyClass) {
+			logger.Infof("ProxyClass %s specified for the proxy, but it is not (yet) in a ready state, waiting..")
+			return nil, nil
+		}
+	}
+	sts.ProxyClass = proxyClass
+
+	if sts.proxyType == proxyTypeConnector {
+		if err := r.reconcileStaticEndpoints(ctx, sts, hsvc); err != nil {
+			return nil, fmt.Errorf("failed to reconcile static endpoints: %w", err)
+		}
+	}
+
+	tsClient, err := r.clients.For(sts.Tailnet)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get tappervpn client: %w", err)
+	}
+
+	secretNames, err := r.provisionSecrets(ctx, tsClient, sts, hsvc, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create or get API key secret: %w", err)
+	}
+
+	_, err = r.reconcileSTS(ctx, logger, sts, hsvc, secretNames)
+	if err != nil {
+		return nil, fmt.Errorf("failed to reconcile statefulset: %w", err)
+	}
+	mo := &metricsOpts{
+		proxyStsName: hsvc.Name,
+		tsNamespace:  hsvc.Namespace,
+		proxyLabels:  hsvc.Labels,
+		proxyType:    sts.proxyType,
+	}
+	if err = reconcileMetricsResources(ctx, logger, mo, sts.ProxyClass, r.Client); err != nil {
+		return nil, fmt.Errorf("failed to ensure metrics resources: %w", err)
+	}
+	return hsvc, nil
+}
+
+// reconcileStaticEndpoints provisions a static endpoints NodePort Service for
+// each replica of the proxy when its ProxyClass configures static endpoints,
+// and deletes the NodePort Services when it does not (or when the replica
+// count shrinks). The allocated ports are stored on the config for
+// provisionSecrets and reconcileSTS to consume.
+func (r *tappervpnSTSReconciler) reconcileStaticEndpoints(ctx context.Context, sts *tappervpnSTSConfig, hsvc *corev1.Service) error {
+	if sts.ProxyClass == nil || sts.ProxyClass.Spec.StaticEndpoints == nil {
+		// The ProxyClass may have been switched away from one that
+		// configured static endpoints, so delete any dangling NodePort
+		// Services.
+		return deleteStaticEndpointsServices(ctx, r.Client, r.operatorNamespace, sts.proxyType, sts.ParentResourceName, 0)
+	}
+
+	var err error
+	sts.svcToNodePorts, sts.tappervpndPort, err = staticendpoints.EnsureNodePortServices(ctx, r.Client, staticendpoints.Config{
+		Namespace:      r.operatorNamespace,
+		ParentType:     sts.proxyType,
+		ParentName:     sts.ParentResourceName,
+		ProxyClassName: sts.ProxyClass.Name,
+		Replicas:       sts.Replicas,
+		PortRanges:     sts.ProxyClass.Spec.StaticEndpoints.NodePort.Ports,
+		MakeService: func(ordinal int32, name string) *corev1.Service {
+			return nodePortService(sts, hsvc, ordinal, name, r.operatorNamespace)
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("error provisioning NodePort Services for static endpoints: %w", err)
+	}
+
+	// Delete NodePort Services of replicas that no longer exist after a
+	// scale down.
+	return deleteStaticEndpointsServices(ctx, r.Client, r.operatorNamespace, sts.proxyType, sts.ParentResourceName, sts.Replicas)
+}
+
+// nodePortService returns the base definition of the static endpoints
+// NodePort Service for the given replica of the proxy's StatefulSet. Unlike
+// most child resources its labels do not carry parent-resource-ns: the
+// headless Service is looked up by the full child resource label set, so the
+// NodePort Services must not match it.
+func nodePortService(sts *tappervpnSTSConfig, hsvc *corev1.Service, ordinal int32, name, namespace string) *corev1.Service {
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			Labels:    reconciler.Labels(sts.proxyType, sts.ParentResourceName, ""),
+		},
+		Spec: corev1.ServiceSpec{
+			Type: corev1.ServiceTypeNodePort,
+			Ports: []corev1.ServicePort{
+				{
+					Name:     staticEndpointPortName,
+					Protocol: corev1.ProtocolUDP,
+				},
+			},
+			// The StatefulSet is named after the headless Service, so
+			// each replica's Pod is named <headless Service name>-<ordinal>.
+			Selector: map[string]string{
+				appsv1.StatefulSetPodNameLabel: fmt.Sprintf("%s-%d", hsvc.Name, ordinal),
+			},
+		},
+	}
+}
+
+// deleteStaticEndpointsServices deletes the static endpoints NodePort
+// Services of the parent resource's replicas with ordinals >= keepReplicas.
+// Passing 0 deletes all of them.
+func deleteStaticEndpointsServices(ctx context.Context, c client.Client, namespace, proxyType, parentName string, keepReplicas int32) error {
+	svcs := new(corev1.ServiceList)
+	if err := c.List(ctx, svcs, client.InNamespace(namespace), client.MatchingLabels(reconciler.Labels(proxyType, parentName, ""))); err != nil {
+		return fmt.Errorf("error listing static endpoints Services: %w", err)
+	}
+
+	for _, svc := range svcs.Items {
+		// The headless Service shares the same labels, so only consider
+		// NodePort Services.
+		if svc.Spec.Type != corev1.ServiceTypeNodePort {
+			continue
+		}
+		var ordinal int32
+		if _, err := fmt.Sscanf(svc.Name, parentName+"-%d-nodeport", &ordinal); err != nil {
+			continue
+		}
+		if ordinal < keepReplicas {
+			continue
+		}
+		if err := c.Delete(ctx, &svc); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("error deleting static endpoints Service %q: %w", svc.Name, err)
+		}
+	}
+
+	return nil
+}
+
+// Cleanup removes all resources associated that were created by Provision with
+// the given labels. It returns true when all resources have been removed,
+// otherwise it returns false and the caller should retry later.
+func (r *tappervpnSTSReconciler) Cleanup(ctx context.Context, tailnet string, logger *zap.SugaredLogger, labels map[string]string, typ string) (done bool, _ error) {
+	tsClient, err := r.clients.For(tailnet)
+	if err != nil {
+		logger.Errorf("failed to get tappervpn client: %v", err)
+		return false, nil
+	}
+
+	// Need to delete the StatefulSet first, and delete it with foreground
+	// cascading deletion. That way, the pod that's writing to the Secret will
+	// stop running before we start looking at the Secret's contents, and
+	// assuming k8s ordering semantics don't mess with us, that should avoid
+	// tappervpn device deletion races where we fail to notice a device that
+	// should be removed.
+	sts, err := getSingleObject[appsv1.StatefulSet](ctx, r.Client, r.operatorNamespace, labels)
+	if err != nil {
+		return false, fmt.Errorf("getting statefulset: %w", err)
+	}
+
+	if sts != nil {
+		if !sts.GetDeletionTimestamp().IsZero() {
+			// Deletion in progress, check again later. We'll get another
+			// notification when the deletion is complete.
+			logger.Debugf("waiting for statefulset %s/%s deletion", sts.GetNamespace(), sts.GetName())
+			return false, nil
+		}
+
+		options := []client.DeleteAllOfOption{
+			client.InNamespace(r.operatorNamespace),
+			client.MatchingLabels(labels),
+			client.PropagationPolicy(metav1.DeletePropagationForeground),
+		}
+
+		if err = r.DeleteAllOf(ctx, &appsv1.StatefulSet{}, options...); err != nil {
+			return false, fmt.Errorf("deleting statefulset: %w", err)
+		}
+
+		logger.Debugf("started deletion of statefulset %s/%s", sts.GetNamespace(), sts.GetName())
+		return false, nil
+	}
+
+	devices, err := r.DeviceInfo(ctx, labels, logger)
+	if err != nil {
+		return false, fmt.Errorf("getting device info: %w", err)
+	}
+
+	for _, dev := range devices {
+		if dev.id != "" {
+			logger.Debugf("deleting device %s from control", string(dev.id))
+			err = tsClient.Devices().Delete(ctx, string(dev.id))
+			switch {
+			case tappervpn.IsNotFound(err):
+				logger.Debugf("device %s not found, likely because it has already been deleted from control", string(dev.id))
+			case err != nil:
+				return false, fmt.Errorf("deleting device: %w", err)
+			}
+
+			logger.Debugf("device %s deleted from control", string(dev.id))
+		}
+	}
+
+	resourceTypes := []client.Object{
+		&corev1.Service{},
+		&corev1.Secret{},
+	}
+
+	for _, resourceType := range resourceTypes {
+		if err = r.DeleteAllOf(ctx, resourceType, client.InNamespace(r.operatorNamespace), client.MatchingLabels(labels)); err != nil {
+			return false, err
+		}
+	}
+
+	if typ == proxyTypeConnector {
+		// Static endpoints NodePort Services carry a reduced label set, so
+		// they are not caught by the deletes above.
+		if err := deleteStaticEndpointsServices(ctx, r.Client, r.operatorNamespace, typ, labels[LabelParentName], 0); err != nil {
+			return false, fmt.Errorf("error deleting static endpoints Services: %w", err)
+		}
+	}
+
+	mo := &metricsOpts{
+		proxyLabels: labels,
+		tsNamespace: r.operatorNamespace,
+		proxyType:   typ,
+	}
+
+	if err = maybeCleanupMetricsResources(ctx, mo, r.Client); err != nil {
+		return false, fmt.Errorf("error cleaning up metrics resources: %w", err)
+	}
+
+	return true, nil
+}
+
+// maxStatefulSetNameLength is maximum length the StatefulSet name can
+// have to NOT result in a too long value for controller-revision-hash
+// label value (see https://github.com/kubernetes/kubernetes/issues/64023).
+// controller-revision-hash label value consists of StatefulSet's name + hyphen + revision hash.
+// Maximum label value length is 63 chars. Length of revision hash is 10 chars.
+// https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#syntax-and-character-set
+// https://github.com/kubernetes/kubernetes/blob/v1.28.4/pkg/controller/history/controller_history.go#L90-L104
+const maxStatefulSetNameLength = 63 - 10 - 1
+
+// statefulSetNameBase accepts name of parent resource and returns a string in
+// form ts-<portion-of-parentname>- that, when passed to Kubernetes name
+// generation will NOT result in a StatefulSet name longer than 52 chars.
+// This is done because of https://github.com/kubernetes/kubernetes/issues/64023.
+func statefulSetNameBase(parent string) string {
+	base := fmt.Sprintf("ts-%s-", parent)
+	generator := names.SimpleNameGenerator
+	for {
+		generatedName := generator.GenerateName(base)
+		excess := len(generatedName) - maxStatefulSetNameLength
+		if excess <= 0 {
+			return base
+		}
+		base = base[:len(base)-1-excess] // cut off the excess chars
+		base = base + "-"                // re-instate the dash
+	}
+}
+
+func (r *tappervpnSTSReconciler) reconcileHeadlessService(ctx context.Context, logger *zap.SugaredLogger, sts *tappervpnSTSConfig) (*corev1.Service, error) {
+	nameBase := statefulSetNameBase(sts.ParentResourceName)
+	hsvc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: nameBase,
+			Namespace:    r.operatorNamespace,
+			Labels:       sts.ChildResourceLabels,
+		},
+		Spec: corev1.ServiceSpec{
+			ClusterIP: "None",
+			Selector: map[string]string{
+				"app": sts.ParentResourceUID,
+			},
+			IPFamilyPolicy: new(corev1.IPFamilyPolicyPreferDualStack),
+		},
+	}
+	logger.Debugf("reconciling headless service for StatefulSet")
+	return createOrUpdate(ctx, r.Client, r.operatorNamespace, hsvc, func(svc *corev1.Service) { svc.Spec = hsvc.Spec })
+}
+
+func (r *tappervpnSTSReconciler) provisionSecrets(ctx context.Context, tsClient tsclient.Client, stsC *tappervpnSTSConfig, hsvc *corev1.Service, logger *zap.SugaredLogger) ([]string, error) {
+	secretNames := make([]string, stsC.Replicas)
+
+	// Start by ensuring we have Secrets for the desired number of replicas. This will handle both creating and scaling
+	// up a StatefulSet.
+	for i := range stsC.Replicas {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      fmt.Sprintf("%s-%d", hsvc.Name, i),
+				Namespace: r.operatorNamespace,
+				Labels:    stsC.ChildResourceLabels,
+			},
+		}
+
+		// If we only have a single replica, use the hostname verbatim. Otherwise, use the hostname prefix and add
+		// an ordinal suffix.
+		hostname := stsC.Hostname
+		if stsC.HostnamePrefix != "" {
+			hostname = fmt.Sprintf("%s-%d", stsC.HostnamePrefix, i)
+		}
+
+		secretNames[i] = secret.Name
+
+		var orig *corev1.Secret // unmodified copy of secret
+		if err := r.Get(ctx, client.ObjectKeyFromObject(secret), secret); err == nil {
+			logger.Debugf("secret %s/%s already exists", secret.GetNamespace(), secret.GetName())
+			orig = secret.DeepCopy()
+		} else if !apierrors.IsNotFound(err) {
+			return nil, err
+		}
+
+		var (
+			authKey string
+			err     error
+		)
+
+		if orig == nil {
+			// Create API Key secret which is going to be used by the statefulset
+			// to authenticate with TapperVPN.
+			logger.Debugf("creating authkey for new tappervpn proxy")
+			tags := stsC.Tags
+			if len(tags) == 0 {
+				tags = r.defaultTags
+			}
+
+			authKey, err = newAuthKey(ctx, tsClient, tags)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		var staticEndpoints []netip.AddrPort
+		if len(stsC.svcToNodePorts) > 0 {
+			nodePortSvcName := staticendpoints.NodePortServiceName(stsC.ParentResourceName, i)
+			port, ok := stsC.svcToNodePorts[nodePortSvcName]
+			if !ok {
+				return nil, fmt.Errorf("could not find configured NodePort for replica %d", i)
+			}
+
+			staticEndpoints, err = staticendpoints.FindEndpoints(ctx, r.Client, staticEndpointsFromConfigSecret(orig, logger), stsC.ProxyClass, port, logger)
+			if err != nil {
+				return nil, fmt.Errorf("could not find static endpoints for replica %d: %w", i, err)
+			}
+			mak.Set(&stsC.staticEndpointsPerReplica, i, staticEndpoints)
+		}
+
+		configs, err := tappervpndConfig(stsC, tsClient.LoginURL(), authKey, orig, hostname, staticEndpoints)
+		if err != nil {
+			return nil, fmt.Errorf("error creating tappervpnd config: %w", err)
+		}
+
+		latest := tailcfg.CapabilityVersion(-1)
+		var latestConfig ipn.ConfigVAlpha
+		for key, val := range configs {
+			fn := tsoperator.TapperVPNdConfigFileName(key)
+			b, err := json.Marshal(val)
+			if err != nil {
+				return nil, fmt.Errorf("error marshalling tappervpnd config: %w", err)
+			}
+
+			mak.Set(&secret.StringData, fn, string(b))
+			if key > latest {
+				latest = key
+				latestConfig = val
+			}
+		}
+
+		if stsC.ServeConfig != nil {
+			j, err := json.Marshal(stsC.ServeConfig)
+			if err != nil {
+				return nil, err
+			}
+
+			mak.Set(&secret.StringData, "serve-config", string(j))
+		}
+
+		if orig != nil && !apiequality.Semantic.DeepEqual(latest, orig) {
+			logger.With("config", sanitizeConfig(latestConfig)).Debugf("patching the existing proxy Secret")
+			if err = r.Patch(ctx, secret, client.MergeFrom(orig)); err != nil {
+				return nil, err
+			}
+		} else {
+			logger.With("config", sanitizeConfig(latestConfig)).Debugf("creating a new Secret for the proxy")
+			if err = r.Create(ctx, secret); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	// Next, we check if we have additional secrets and remove them and their associated device. This happens when we
+	// scale an StatefulSet down.
+	var secrets corev1.SecretList
+	if err := r.List(ctx, &secrets, client.InNamespace(r.operatorNamespace), client.MatchingLabels(stsC.ChildResourceLabels)); err != nil {
+		return nil, err
+	}
+
+	for _, secret := range secrets.Items {
+		var ordinal int32
+		if _, err := fmt.Sscanf(secret.Name, hsvc.Name+"-%d", &ordinal); err != nil {
+			return nil, err
+		}
+
+		if ordinal < stsC.Replicas {
+			continue
+		}
+
+		dev, err := deviceInfo(&secret, "", logger)
+		if err != nil {
+			return nil, err
+		}
+
+		if dev != nil && dev.id != "" {
+			// If we get a not found error then this device has possibly already been deleted in the admin console.
+			// So we can ignore this and move on to removing the secret.
+			if err = tsClient.Devices().Delete(ctx, string(dev.id)); err != nil && !tappervpn.IsNotFound(err) {
+				return nil, err
+			}
+		}
+
+		if err = r.Delete(ctx, &secret); err != nil {
+			return nil, err
+		}
+	}
+
+	return secretNames, nil
+}
+
+// sanitizeConfig returns an ipn.ConfigVAlpha with sensitive fields redacted. Since we pump everything
+// into JSON-encoded logs it's easier to read this with a .With method than converting it to a string.
+func sanitizeConfig(c ipn.ConfigVAlpha) ipn.ConfigVAlpha {
+	// Explicitly redact AuthKey because we never want it appearing in logs. Never populate this with the
+	// actual auth key.
+	if c.AuthKey != nil {
+		c.AuthKey = new("**redacted**")
+	}
+
+	return c
+}
+
+// DeviceInfo returns the device ID, hostname, IPs and capver for the TapperVPN device that acts as an operator proxy.
+// It retrieves info from a Kubernetes Secret labeled with the provided labels. Capver is cross-validated against the
+// Pod to ensure that it is the currently running Pod that set the capver. If the Pod or the Secret does not exist, the
+// returned capver is -1. Either of device ID, hostname and IPs can be empty string if not found in the Secret.
+func (r *tappervpnSTSReconciler) DeviceInfo(ctx context.Context, childLabels map[string]string, logger *zap.SugaredLogger) ([]*device, error) {
+	var secrets corev1.SecretList
+	if err := r.List(ctx, &secrets, client.InNamespace(r.operatorNamespace), client.MatchingLabels(childLabels)); err != nil {
+		return nil, err
+	}
+
+	devices := make([]*device, 0)
+	for _, sec := range secrets.Items {
+		podUID := ""
+		pod := new(corev1.Pod)
+		err := r.Get(ctx, types.NamespacedName{Namespace: sec.Namespace, Name: sec.Name}, pod)
+		switch {
+		case apierrors.IsNotFound(err):
+			// If the Pod is not found, we won't have its UID. We can still get the device information but the
+			// capability version will be unknown.
+		case err != nil:
+			return nil, err
+		default:
+			podUID = string(pod.ObjectMeta.UID)
+		}
+
+		info, err := deviceInfo(&sec, podUID, logger)
+		if err != nil {
+			return nil, err
+		}
+
+		if info != nil {
+			devices = append(devices, info)
+		}
+	}
+
+	return devices, nil
+}
+
+// device contains tappervpn state of a proxy device as gathered from its tappervpn state Secret.
+type device struct {
+	id       tailcfg.StableNodeID // device's stable ID
+	hostname string               // MagicDNS name of the device
+	ips      []string             // TapperVPN IPs of the device
+	// ingressDNSName is the L7 Ingress DNS name. In practice this will be the same value as hostname, but only set
+	// when the device has been configured to serve traffic on it via 'tappervpn serve'.
+	ingressDNSName string
+	capver         tailcfg.CapabilityVersion
+	// ordinal is the replica ordinal parsed from the state Secret's name,
+	// or -1 if it could not be parsed.
+	ordinal int32
+}
+
+func deviceInfo(sec *corev1.Secret, podUID string, log *zap.SugaredLogger) (dev *device, err error) {
+	id := tailcfg.StableNodeID(sec.Data[kubetypes.KeyDeviceID])
+	if id == "" {
+		return dev, nil
+	}
+	dev = &device{id: id, ordinal: ordinalFromName(sec.Name)}
+	// Kubernetes chokes on well-formed FQDNs with the trailing dot, so we have
+	// to remove it.
+	dev.hostname = strings.TrimSuffix(string(sec.Data[kubetypes.KeyDeviceFQDN]), ".")
+	if dev.hostname == "" {
+		// Device ID gets stored and retrieved in a different flow than
+		// FQDN and IPs. A device that acts as Kubernetes operator
+		// proxy, but whose route setup has failed might have a device
+		// ID, but no FQDN/IPs. If so, return the ID, to allow the
+		// operator to clean up such devices.
+		return dev, nil
+	}
+	dev.ingressDNSName = dev.hostname
+	pcv := proxyCapVer(sec, podUID, log)
+	dev.capver = pcv
+	// TODO(irbekrm): we fall back to using the hostname field to determine Ingress's hostname to ensure backwards
+	// compatibility. In 1.82 we can remove this fallback mechanism.
+	if pcv >= 109 {
+		dev.ingressDNSName = strings.TrimSuffix(string(sec.Data[kubetypes.KeyHTTPSEndpoint]), ".")
+		if strings.EqualFold(dev.ingressDNSName, kubetypes.ValueNoHTTPS) {
+			dev.ingressDNSName = ""
+		}
+	}
+	if rawDeviceIPs, ok := sec.Data[kubetypes.KeyDeviceIPs]; ok {
+		ips := make([]string, 0)
+		if err := json.Unmarshal(rawDeviceIPs, &ips); err != nil {
+			return nil, err
+		}
+		dev.ips = ips
+	}
+	return dev, nil
+}
+
+// ordinalFromName returns the replica ordinal from the name of a resource
+// created per replica of a StatefulSet, such as a Pod or state Secret named
+// <StatefulSet name>-<ordinal>. It returns -1 if the name does not end in an
+// ordinal.
+func ordinalFromName(name string) int32 {
+	idx := strings.LastIndex(name, "-")
+	if idx < 0 {
+		return -1
+	}
+	ordinal, err := strconv.ParseInt(name[idx+1:], 10, 32)
+	if err != nil {
+		return -1
+	}
+	return int32(ordinal)
+}
+
+func newAuthKey(ctx context.Context, client tsclient.Client, tags []string) (string, error) {
+	var caps tappervpn.KeyCapabilities
+	caps.Devices.Create.Reusable = false
+	caps.Devices.Create.Preauthorized = true
+	caps.Devices.Create.Tags = tags
+
+	key, err := client.Keys().CreateAuthKey(ctx, tappervpn.CreateKeyRequest{Capabilities: caps})
+	if err != nil {
+		return "", err
+	}
+
+	return key.Key, nil
+}
+
+//go:embed deploy/manifests/proxy.yaml
+var proxyYaml []byte
+
+//go:embed deploy/manifests/userspace-proxy.yaml
+var userspaceProxyYaml []byte
+
+func (r *tappervpnSTSReconciler) reconcileSTS(ctx context.Context, logger *zap.SugaredLogger, sts *tappervpnSTSConfig, headlessSvc *corev1.Service, proxySecrets []string) (*appsv1.StatefulSet, error) {
+	ss := new(appsv1.StatefulSet)
+	if sts.ServeConfig != nil && sts.ForwardClusterTrafficViaL7IngressProxy != true { // If forwarding cluster traffic via is required we need non-userspace + NET_ADMIN + forwarding
+		if err := yaml.Unmarshal(userspaceProxyYaml, &ss); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal userspace proxy spec: %v", err)
+		}
+	} else {
+		if err := yaml.Unmarshal(proxyYaml, &ss); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal proxy spec: %w", err)
+		}
+		for i := range ss.Spec.Template.Spec.InitContainers {
+			c := &ss.Spec.Template.Spec.InitContainers[i]
+			if c.Name == "sysctler" {
+				c.Image = r.proxyImage
+				break
+			}
+		}
+	}
+	pod := &ss.Spec.Template
+	container := &pod.Spec.Containers[0]
+	container.Image = r.proxyImage
+	ss.ObjectMeta = metav1.ObjectMeta{
+		Name:      headlessSvc.Name,
+		Namespace: r.operatorNamespace,
+	}
+	for key, val := range sts.ChildResourceLabels {
+		mak.Set(&ss.ObjectMeta.Labels, key, val)
+	}
+	ss.Spec.ServiceName = headlessSvc.Name
+	ss.Spec.Selector = &metav1.LabelSelector{
+		MatchLabels: map[string]string{
+			"app": sts.ParentResourceUID,
+		},
+	}
+	mak.Set(&pod.Labels, "app", sts.ParentResourceUID)
+	// sync StatefulSet labels to Pod to make it easier for users to select the Pod
+	maps.Copy(pod.Labels, sts.ChildResourceLabels)
+
+	if sts.Replicas > 0 {
+		ss.Spec.Replicas = new(sts.Replicas)
+	}
+
+	// Generic containerboot configuration options.
+	container.Env = append(container.Env,
+		corev1.EnvVar{
+			Name:  "TS_KUBE_SECRET",
+			Value: "$(POD_NAME)",
+		},
+		corev1.EnvVar{
+			Name:  "TS_EXPERIMENTAL_SERVICE_AUTO_ADVERTISEMENT",
+			Value: "false",
+		},
+		corev1.EnvVar{
+			Name:  "TS_EXPERIMENTAL_VERSIONED_CONFIG_DIR",
+			Value: "/etc/tsconfig/$(POD_NAME)",
+		},
+		corev1.EnvVar{
+			// This ensures that cert renewals can succeed if ACME account
+			// keys have changed since issuance. We cannot guarantee or
+			// validate that the account key has not changed, see
+			// https://github.com/tailscale/tailscale/issues/18251
+			Name:  "TS_DEBUG_ACME_FORCE_RENEWAL",
+			Value: "true",
+		},
+	)
+
+	if sts.tappervpndPort != nil {
+		// tappervpnd must listen on the target port of the static endpoints
+		// NodePort Services.
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  "PORT",
+			Value: strconv.Itoa(int(*sts.tappervpndPort)),
+		})
+	}
+
+	if sts.ForwardClusterTrafficViaL7IngressProxy {
+		container.Env = append(container.Env,
+			corev1.EnvVar{
+				Name:  "EXPERIMENTAL_ALLOW_PROXYING_CLUSTER_TRAFFIC_VIA_INGRESS",
+				Value: "true",
+			},
+			// Cluster traffic reaches this proxy on its Pod IP and is
+			// forwarded to the node's TapperVPN IP, where serve answers it.
+			// On Linux the serve listener is otherwise bound to the tunnel
+			// interface and would drop that traffic, so opt the listener out
+			// of the interface bind.
+			corev1.EnvVar{
+				Name:  "TS_SERVE_ALLOW_ALL_INTERFACES",
+				Value: "true",
+			},
+		)
+	}
+
+	for i, secret := range proxySecrets {
+		configVolume := corev1.Volume{
+			Name: "tappervpndconfig-" + strconv.Itoa(i),
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: secret,
+				},
+			},
+		}
+
+		pod.Spec.Volumes = append(ss.Spec.Template.Spec.Volumes, configVolume)
+		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+			Name:      fmt.Sprintf("tappervpndconfig-%d", i),
+			ReadOnly:  true,
+			MountPath: path.Join("/etc/tsconfig/", secret),
+		})
+	}
+
+	if r.tsFirewallMode != "" {
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  "TS_DEBUG_FIREWALL_MODE",
+			Value: r.tsFirewallMode,
+		})
+	}
+	pod.Spec.PriorityClassName = r.proxyPriorityClassName
+
+	// Ingress/egress proxy configuration options.
+	if sts.ClusterTargetIP != "" {
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  "TS_DEST_IP",
+			Value: sts.ClusterTargetIP,
+		})
+		mak.Set(&ss.Spec.Template.Annotations, podAnnotationLastSetClusterIP, sts.ClusterTargetIP)
+	} else if sts.ClusterTargetDNSName != "" {
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  "TS_EXPERIMENTAL_DEST_DNS_NAME",
+			Value: sts.ClusterTargetDNSName,
+		})
+		mak.Set(&ss.Spec.Template.Annotations, podAnnotationLastSetClusterDNSName, sts.ClusterTargetDNSName)
+	} else if sts.TailnetTargetIP != "" {
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  "TS_TAILNET_TARGET_IP",
+			Value: sts.TailnetTargetIP,
+		})
+		mak.Set(&ss.Spec.Template.Annotations, podAnnotationLastSetTailnetTargetIP, sts.TailnetTargetIP)
+	} else if sts.TailnetTargetFQDN != "" {
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  "TS_TAILNET_TARGET_FQDN",
+			Value: sts.TailnetTargetFQDN,
+		})
+		mak.Set(&ss.Spec.Template.Annotations, podAnnotationLastSetTailnetTargetFQDN, sts.TailnetTargetFQDN)
+	} else if sts.ServeConfig != nil {
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  "TS_SERVE_CONFIG",
+			Value: "/etc/tappervpnd/$(POD_NAME)/serve-config",
+		})
+
+		for i, secret := range proxySecrets {
+			container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+				Name:      "serve-config-" + strconv.Itoa(i),
+				ReadOnly:  true,
+				MountPath: path.Join("/etc/tappervpnd", secret),
+			})
+
+			pod.Spec.Volumes = append(ss.Spec.Template.Spec.Volumes, corev1.Volume{
+				Name: "serve-config-" + strconv.Itoa(i),
+				VolumeSource: corev1.VolumeSource{
+					Secret: &corev1.SecretVolumeSource{
+						SecretName: secret,
+						Items:      []corev1.KeyToPath{{Key: "serve-config", Path: "serve-config"}},
+					},
+				},
+			})
+		}
+
+	}
+
+	app, err := appInfoForProxy(sts)
+	if err != nil {
+		// No need to error out if now or in future we end up in a
+		// situation where app info cannot be determined for one of the
+		// many proxy configurations that the operator can produce.
+		logger.Error("unable to determine proxy type")
+	} else {
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  "TS_INTERNAL_APP",
+			Value: app,
+		})
+	}
+	logger.Debugf("reconciling statefulset %s/%s", ss.GetNamespace(), ss.GetName())
+	if sts.ProxyClassName != "" {
+		logger.Debugf("configuring proxy resources with ProxyClass %s", sts.ProxyClassName)
+		ss = applyProxyClassToStatefulSet(sts.ProxyClass, ss, sts, logger)
+	}
+	updateSS := func(s *appsv1.StatefulSet) {
+		s.Spec = ss.Spec
+		s.ObjectMeta.Labels = ss.Labels
+		s.ObjectMeta.Annotations = ss.Annotations
+	}
+	return createOrUpdate(ctx, r.Client, r.operatorNamespace, ss, updateSS)
+}
+
+func appInfoForProxy(cfg *tappervpnSTSConfig) (string, error) {
+	if cfg.ClusterTargetDNSName != "" || cfg.ClusterTargetIP != "" {
+		return kubetypes.AppIngressProxy, nil
+	}
+	if cfg.TailnetTargetFQDN != "" || cfg.TailnetTargetIP != "" {
+		return kubetypes.AppEgressProxy, nil
+	}
+	if cfg.ServeConfig != nil {
+		return kubetypes.AppIngressResource, nil
+	}
+	if cfg.Connector != nil {
+		return kubetypes.AppConnector, nil
+	}
+	return "", errors.New("unable to determine proxy type")
+}
+
+// mergeStatefulSetLabelsOrAnnots returns a map that contains all keys/values
+// present in 'custom' map as well as those keys/values from the current map
+// whose keys are present in the 'managed' map. The reason why this merge is
+// necessary is to ensure that labels/annotations applied from a ProxyClass get removed
+// if they are removed from a ProxyClass or if the ProxyClass no longer applies
+// to this StatefulSet whilst any tappervpn managed labels/annotations remain present.
+func mergeStatefulSetLabelsOrAnnots(current, custom map[string]string, managed []string) map[string]string {
+	if custom == nil {
+		custom = make(map[string]string)
+	}
+	if current == nil {
+		return custom
+	}
+	for key, val := range current {
+		if slices.Contains(managed, key) {
+			custom[key] = val
+		}
+	}
+	return custom
+}
+
+func debugSetting(pc *tsapi.ProxyClass) bool {
+	if pc == nil ||
+		pc.Spec.StatefulSet == nil ||
+		pc.Spec.StatefulSet.Pod == nil ||
+		pc.Spec.StatefulSet.Pod.TapperVPNContainer == nil ||
+		pc.Spec.StatefulSet.Pod.TapperVPNContainer.Debug == nil {
+		// This default will change to false in 1.82.0.
+		return pc.Spec.Metrics != nil && pc.Spec.Metrics.Enable
+	}
+
+	return pc.Spec.StatefulSet.Pod.TapperVPNContainer.Debug.Enable
+}
+
+func applyProxyClassToStatefulSet(pc *tsapi.ProxyClass, ss *appsv1.StatefulSet, stsCfg *tappervpnSTSConfig, logger *zap.SugaredLogger) *appsv1.StatefulSet {
+	if pc == nil || ss == nil {
+		return ss
+	}
+
+	metricsEnabled := pc.Spec.Metrics != nil && pc.Spec.Metrics.Enable
+	debugEnabled := debugSetting(pc)
+	if metricsEnabled || debugEnabled {
+		isEgress := stsCfg != nil && (stsCfg.TailnetTargetFQDN != "" || stsCfg.TailnetTargetIP != "")
+		isForwardingL7Ingress := stsCfg != nil && stsCfg.ForwardClusterTrafficViaL7IngressProxy
+		if isEgress {
+			// TODO (irbekrm): fix this
+			// For Ingress proxies that have been configured with
+			// tappervpn.com/experimental-forward-cluster-traffic-via-ingress
+			// annotation, all cluster traffic is forwarded to the
+			// Ingress backend(s).
+			logger.Info("ProxyClass specifies that metrics should be enabled, but this is currently not supported for egress proxies.")
+		} else if isForwardingL7Ingress {
+			// TODO (irbekrm): fix this
+			// For egress proxies, currently all cluster traffic is forwarded to the tailnet target.
+			logger.Info("ProxyClass specifies that metrics should be enabled, but this is currently not supported for Ingress proxies that accept cluster traffic.")
+		} else {
+			enableEndpoints(ss, metricsEnabled, debugEnabled)
+		}
+	}
+
+	if stsCfg != nil {
+		usesLetsEncrypt := stsCfg.proxyType == proxyTypeIngressResource ||
+			stsCfg.proxyType == string(tsapi.ProxyGroupTypeIngress) ||
+			stsCfg.proxyType == string(tsapi.ProxyGroupTypeKubernetesAPIServer)
+
+		if pc.Spec.UseLetsEncryptStagingEnvironment && usesLetsEncrypt {
+			for i, c := range ss.Spec.Template.Spec.Containers {
+				if isMainContainer(&c) {
+					ss.Spec.Template.Spec.Containers[i].Env = append(ss.Spec.Template.Spec.Containers[i].Env, corev1.EnvVar{
+						Name:  "TS_DEBUG_ACME_DIRECTORY_URL",
+						Value: letsEncryptStagingEndpoint,
+					})
+					break
+				}
+			}
+		}
+	}
+
+	if pc.Spec.StatefulSet == nil {
+		return ss
+	}
+
+	// Update StatefulSet metadata.
+	if wantsSSLabels := pc.Spec.StatefulSet.Labels.Parse(); len(wantsSSLabels) > 0 {
+		ss.ObjectMeta.Labels = mergeStatefulSetLabelsOrAnnots(ss.ObjectMeta.Labels, wantsSSLabels, tappervpnManagedLabels)
+	}
+	if wantsSSAnnots := pc.Spec.StatefulSet.Annotations; len(wantsSSAnnots) > 0 {
+		ss.ObjectMeta.Annotations = mergeStatefulSetLabelsOrAnnots(ss.ObjectMeta.Annotations, wantsSSAnnots, tappervpnManagedAnnotations)
+	}
+
+	// Update Pod fields.
+	if pc.Spec.StatefulSet.Pod == nil {
+		return ss
+	}
+	wantsPod := pc.Spec.StatefulSet.Pod
+	if wantsPodLabels := wantsPod.Labels.Parse(); len(wantsPodLabels) > 0 {
+		ss.Spec.Template.ObjectMeta.Labels = mergeStatefulSetLabelsOrAnnots(ss.Spec.Template.ObjectMeta.Labels, wantsPodLabels, tappervpnManagedLabels)
+	}
+	if wantsPodAnnots := wantsPod.Annotations; len(wantsPodAnnots) > 0 {
+		ss.Spec.Template.ObjectMeta.Annotations = mergeStatefulSetLabelsOrAnnots(ss.Spec.Template.ObjectMeta.Annotations, wantsPodAnnots, tappervpnManagedAnnotations)
+	}
+	ss.Spec.Template.Spec.SecurityContext = wantsPod.SecurityContext
+	ss.Spec.Template.Spec.ImagePullSecrets = wantsPod.ImagePullSecrets
+	ss.Spec.Template.Spec.NodeName = wantsPod.NodeName
+	ss.Spec.Template.Spec.NodeSelector = wantsPod.NodeSelector
+	ss.Spec.Template.Spec.Affinity = wantsPod.Affinity
+	ss.Spec.Template.Spec.Tolerations = wantsPod.Tolerations
+	ss.Spec.Template.Spec.PriorityClassName = wantsPod.PriorityClassName
+	ss.Spec.Template.Spec.TopologySpreadConstraints = wantsPod.TopologySpreadConstraints
+	if wantsPod.DNSPolicy != nil {
+		ss.Spec.Template.Spec.DNSPolicy = *wantsPod.DNSPolicy
+	}
+	if wantsPod.DNSConfig != nil {
+		ss.Spec.Template.Spec.DNSConfig = wantsPod.DNSConfig
+	}
+
+	// Update containers.
+	updateContainer := func(overlay *tsapi.Container, base corev1.Container) corev1.Container {
+		if overlay == nil {
+			return base
+		}
+		if overlay.SecurityContext != nil {
+			base.SecurityContext = overlay.SecurityContext
+		}
+
+		if len(overlay.Resources.Requests) > 0 {
+			base.Resources.Requests = overlay.Resources.Requests
+		}
+		if len(overlay.Resources.Limits) > 0 {
+			base.Resources.Limits = overlay.Resources.Limits
+		}
+		if len(overlay.Resources.Claims) > 0 {
+			base.Resources.Limits = overlay.Resources.Limits
+		}
+
+		for _, e := range overlay.Env {
+			// Env vars configured via ProxyClass might override env
+			// vars that have been specified by the operator, i.e
+			// TS_USERSPACE. The intended behaviour is to allow this
+			// and in practice it works without explicitly removing
+			// the operator configured value here as a later value
+			// in the env var list overrides an earlier one.
+			base.Env = append(base.Env, corev1.EnvVar{Name: string(e.Name), Value: e.Value})
+		}
+		if overlay.Image != "" {
+			base.Image = overlay.Image
+		}
+		if overlay.ImagePullPolicy != "" {
+			base.ImagePullPolicy = overlay.ImagePullPolicy
+		}
+		return base
+	}
+	for i, c := range ss.Spec.Template.Spec.Containers {
+		if isMainContainer(&c) {
+			ss.Spec.Template.Spec.Containers[i] = updateContainer(wantsPod.TapperVPNContainer, ss.Spec.Template.Spec.Containers[i])
+			break
+		}
+	}
+	if initContainers := ss.Spec.Template.Spec.InitContainers; len(initContainers) > 0 {
+		for i, c := range initContainers {
+			if c.Name == "sysctler" {
+				ss.Spec.Template.Spec.InitContainers[i] = updateContainer(wantsPod.TapperVPNInitContainer, initContainers[i])
+				break
+			}
+		}
+	}
+	return ss
+}
+
+func enableEndpoints(ss *appsv1.StatefulSet, metrics, debug bool) {
+	for i, c := range ss.Spec.Template.Spec.Containers {
+		if isMainContainer(&c) {
+			if debug {
+				ss.Spec.Template.Spec.Containers[i].Env = append(ss.Spec.Template.Spec.Containers[i].Env,
+					// Serve tappervpnd's debug metrics on
+					// <pod-ip>:9001/debug/metrics. If we didn't specify Pod IP
+					// here, the proxy would, in some cases, also listen to its
+					// TapperVPN IP- we don't want folks to start relying on this
+					// side-effect as a feature.
+					corev1.EnvVar{
+						Name:  "TS_DEBUG_ADDR_PORT",
+						Value: "$(POD_IP):9001",
+					},
+					// TODO(tomhjp): Can remove this env var once 1.76.x is no
+					// longer supported.
+					corev1.EnvVar{
+						Name:  "TS_TAPPERVPND_EXTRA_ARGS",
+						Value: "--debug=$(TS_DEBUG_ADDR_PORT)",
+					},
+				)
+
+				ss.Spec.Template.Spec.Containers[i].Ports = append(ss.Spec.Template.Spec.Containers[i].Ports,
+					corev1.ContainerPort{
+						Name:          "debug",
+						Protocol:      "TCP",
+						ContainerPort: 9001,
+					},
+				)
+			}
+
+			if metrics {
+				ss.Spec.Template.Spec.Containers[i].Env = append(ss.Spec.Template.Spec.Containers[i].Env,
+					// Serve client metrics on <pod-ip>:9002/metrics.
+					corev1.EnvVar{
+						Name:  "TS_LOCAL_ADDR_PORT",
+						Value: "$(POD_IP):9002",
+					},
+					corev1.EnvVar{
+						Name:  "TS_ENABLE_METRICS",
+						Value: "true",
+					},
+				)
+				ss.Spec.Template.Spec.Containers[i].Ports = append(ss.Spec.Template.Spec.Containers[i].Ports,
+					corev1.ContainerPort{
+						Name:          "metrics",
+						Protocol:      "TCP",
+						ContainerPort: 9002,
+					},
+				)
+			}
+
+			break
+		}
+	}
+}
+
+func isMainContainer(c *corev1.Container) bool {
+	return c.Name == mainContainerName
+}
+
+// tappervpndConfig takes a proxy config, a newly generated auth key if generated and a Secret with the previous proxy
+// state and auth key and returns tappervpnd config files for currently supported proxy versions.
+func tappervpndConfig(stsC *tappervpnSTSConfig, loginUrl string, newAuthkey string, oldSecret *corev1.Secret, hostname string, staticEndpoints []netip.AddrPort) (tappervpndConfigs, error) {
+	conf := &ipn.ConfigVAlpha{
+		Version:             "alpha0",
+		AcceptDNS:           "false",
+		AcceptRoutes:        "false", // AcceptRoutes defaults to true
+		Locked:              "false",
+		Hostname:            &hostname,
+		NoStatefulFiltering: "true", // Explicitly enforce default value, see #14216
+		AppConnector:        &ipn.AppConnectorPrefs{Advertise: false},
+	}
+
+	if stsC.LoginServer != "" {
+		conf.ServerURL = &stsC.LoginServer
+	}
+
+	if stsC.Connector != nil {
+		routes, err := netutil.CalcAdvertiseRoutes(stsC.Connector.routes, stsC.Connector.isExitNode)
+		if err != nil {
+			return nil, fmt.Errorf("error calculating routes: %w", err)
+		}
+		conf.AdvertiseRoutes = routes
+		if stsC.Connector.isAppConnector {
+			conf.AppConnector.Advertise = true
+		}
+	}
+	if shouldAcceptRoutes(stsC.ProxyClass) {
+		conf.AcceptRoutes = "true"
+	}
+
+	if newAuthkey != "" {
+		conf.AuthKey = &newAuthkey
+	} else if !deviceAuthed(oldSecret) {
+		key, err := authKeyFromSecret(oldSecret)
+		if err != nil {
+			return nil, fmt.Errorf("error retrieving auth key from Secret: %w", err)
+		}
+		conf.AuthKey = key
+	}
+
+	if loginUrl != "" {
+		conf.ServerURL = new(loginUrl)
+	}
+
+	capVerConfigs := make(map[tailcfg.CapabilityVersion]ipn.ConfigVAlpha)
+	// StaticEndpoints are only understood by clients of capver 102 and newer,
+	// and the config file is parsed strictly, so only include them in the
+	// capver 107 config. Older clients simply won't advertise them.
+	conf.StaticEndpoints = staticEndpoints
+	capVerConfigs[107] = *conf
+
+	// AppConnector and StaticEndpoints config options are only understood by
+	// clients of capver 107 and 102 (respectively) and newer.
+	conf.AppConnector = nil
+	conf.StaticEndpoints = nil
+	capVerConfigs[95] = *conf
+	return capVerConfigs, nil
+}
+
+// staticEndpointsFromConfigSecret returns the static endpoints previously
+// written to the proxy's tappervpnd config Secret, if any.
+func staticEndpointsFromConfigSecret(secret *corev1.Secret, logger *zap.SugaredLogger) []netip.AddrPort {
+	if secret == nil {
+		return nil
+	}
+	conf, err := latestConfigFromSecret(secret)
+	if err != nil {
+		logger.Debugf("failed to unmarshal tappervpnd config from secret %q: %v", secret.Name, err)
+		return nil
+	}
+	if conf == nil {
+		logger.Debugf("failed to get tappervpnd config from secret %q: empty data", secret.Name)
+		return nil
+	}
+	return conf.StaticEndpoints
+}
+
+// latestConfigFromSecret returns the ipn.ConfigVAlpha with the highest capver
+// as found in the Secret's key names, e.g. "cap-107.hujson" has capver 107.
+// If no config is found, it returns nil.
+func latestConfigFromSecret(s *corev1.Secret) (*ipn.ConfigVAlpha, error) {
+	latest := tailcfg.CapabilityVersion(-1)
+	latestStr := ""
+	for k, data := range s.Data {
+		// write to StringData, read from Data as StringData is write-only
+		if len(data) == 0 {
+			continue
+		}
+		v, err := tsoperator.CapVerFromFileName(k)
+		if err != nil {
+			continue
+		}
+		if v > latest {
+			latestStr = k
+			latest = v
+		}
+	}
+
+	var conf *ipn.ConfigVAlpha
+	if latestStr != "" {
+		conf = &ipn.ConfigVAlpha{}
+		if err := json.Unmarshal([]byte(s.Data[latestStr]), conf); err != nil {
+			return nil, fmt.Errorf("error unmarshaling tappervpnd config from Secret %q in field %q: %w", s.Name, latestStr, err)
+		}
+	}
+
+	return conf, nil
+}
+
+// authKeyFromSecret returns the auth key from the latest config version if
+// found, or else nil.
+func authKeyFromSecret(s *corev1.Secret) (key *string, err error) {
+	conf, err := latestConfigFromSecret(s)
+	if err != nil {
+		return nil, err
+	}
+
+	// Allow for configs that don't contain an auth key. Perhaps
+	// users have some mechanisms to delete them. Auth key is
+	// normally not needed after the initial login.
+	if conf != nil {
+		key = conf.AuthKey
+	}
+
+	return key, nil
+}
+
+// deviceAuthed returns true if the state stored in a proxy's state Secret
+// suggests that the proxy has successfully authenticated.
+func deviceAuthed(s *corev1.Secret) bool {
+	if s == nil {
+		return false // No state Secret means no device state.
+	}
+	return len(s.Data["device_id"]) > 0
+}
+
+func shouldAcceptRoutes(pc *tsapi.ProxyClass) bool {
+	return pc != nil && pc.Spec.TapperVPNConfig != nil && pc.Spec.TapperVPNConfig.AcceptRoutes
+}
+
+// ptrObject is a type constraint for pointer types that implement
+// client.Object.
+type ptrObject[T any] interface {
+	client.Object
+	*T
+}
+
+type tappervpndConfigs map[tailcfg.CapabilityVersion]ipn.ConfigVAlpha
+
+// createOrMaybeUpdate adds obj to the k8s cluster, unless the object already exists,
+// in which case update is called to make changes to it. If update is nil or returns
+// an error, the object is returned unmodified.
+//
+// obj is looked up by its Name and Namespace if Name is set, otherwise it's
+// looked up by labels.
+func createOrMaybeUpdate[T any, O ptrObject[T]](ctx context.Context, c client.Client, ns string, obj O, update func(O) error) (O, error) {
+	var (
+		existing O
+		err      error
+	)
+	if obj.GetName() != "" {
+		existing = new(T)
+		existing.SetName(obj.GetName())
+		existing.SetNamespace(obj.GetNamespace())
+		err = c.Get(ctx, client.ObjectKeyFromObject(obj), existing)
+	} else {
+		existing, err = getSingleObject[T, O](ctx, c, ns, obj.GetLabels())
+	}
+	if err == nil && existing != nil {
+		if update != nil {
+			if err := update(existing); err != nil {
+				return nil, err
+			}
+			if err := c.Update(ctx, existing); err != nil {
+				return nil, err
+			}
+		}
+		return existing, nil
+	}
+	if err != nil && !apierrors.IsNotFound(err) {
+		return nil, fmt.Errorf("failed to get object: %w", err)
+	}
+	if err := c.Create(ctx, obj); err != nil {
+		return nil, err
+	}
+	return obj, nil
+}
+
+// createOrUpdate adds obj to the k8s cluster, unless the object already exists,
+// in which case update is called to make changes to it. If update is nil, the
+// existing object is returned unmodified.
+//
+// obj is looked up by its Name and Namespace if Name is set, otherwise it's
+// looked up by labels.
+func createOrUpdate[T any, O ptrObject[T]](ctx context.Context, c client.Client, ns string, obj O, update func(O)) (O, error) {
+	return createOrMaybeUpdate(ctx, c, ns, obj, func(o O) error {
+		if update != nil {
+			update(o)
+		}
+		return nil
+	})
+}
+
+// getSingleObject searches for k8s objects of type T
+// (e.g. corev1.Service) with the given labels, and returns
+// it. Returns nil if no objects match the labels, and an error if
+// more than one object matches.
+func getSingleObject[T any, O ptrObject[T]](ctx context.Context, c client.Client, ns string, labels map[string]string) (O, error) {
+	ret := O(new(T))
+	kinds, _, err := c.Scheme().ObjectKinds(ret)
+	if err != nil {
+		return nil, err
+	}
+	if len(kinds) != 1 {
+		// TODO: the runtime package apparently has a "pick the best
+		// GVK" function somewhere that might be good enough?
+		return nil, fmt.Errorf("more than 1 GroupVersionKind for %T", ret)
+	}
+
+	gvk := kinds[0]
+	gvk.Kind += "List"
+	lst := unstructured.UnstructuredList{}
+	lst.SetGroupVersionKind(gvk)
+	if err := c.List(ctx, &lst, client.InNamespace(ns), client.MatchingLabels(labels)); err != nil {
+		return nil, err
+	}
+
+	if len(lst.Items) == 0 {
+		return nil, nil
+	}
+	if len(lst.Items) > 1 {
+		return nil, fmt.Errorf("found multiple matching %T objects", ret)
+	}
+	if err := c.Scheme().Convert(&lst.Items[0], ret, nil); err != nil {
+		return nil, err
+	}
+	return ret, nil
+}
+
+func defaultBool(envName string, defVal bool) bool {
+	vs := os.Getenv(envName)
+	if vs == "" {
+		return defVal
+	}
+	v, _ := opt.Bool(vs).Get()
+	return v
+}
+
+func defaultEnv(envName, defVal string) string {
+	v := os.Getenv(envName)
+	if v == "" {
+		return defVal
+	}
+	return v
+}
+
+func nameForService(svc *corev1.Service) string {
+	if h, ok := svc.Annotations[AnnotationHostname]; ok {
+		return h
+	}
+	return svc.Namespace + "-" + svc.Name
+}
+
+// proxyClassForObject returns the proxy class for the given object. If the
+// object does not have a proxy class label, it returns the default proxy class
+func proxyClassForObject(o client.Object, proxyDefaultClass string) string {
+	proxyClass, exists := o.GetLabels()[LabelAnnotationProxyClass]
+	if exists {
+		return proxyClass
+	}
+
+	proxyClass, exists = o.GetAnnotations()[LabelAnnotationProxyClass]
+	if exists {
+		return proxyClass
+	}
+
+	return proxyDefaultClass
+}
+
+func isValidFirewallMode(m string) bool {
+	return m == "auto" || m == "nftables" || m == "iptables"
+}
+
+// proxyCapVer accepts a proxy state Secret and UID of the current proxy Pod returns the capability version of the
+// tappervpn running in that Pod. This is best effort - if the capability version can not (currently) be determined, it
+// returns -1.
+func proxyCapVer(sec *corev1.Secret, podUID string, log *zap.SugaredLogger) tailcfg.CapabilityVersion {
+	if sec == nil || podUID == "" {
+		return tailcfg.CapabilityVersion(-1)
+	}
+	if len(sec.Data[kubetypes.KeyCapVer]) == 0 || len(sec.Data[kubetypes.KeyPodUID]) == 0 {
+		return tailcfg.CapabilityVersion(-1)
+	}
+	capVer, err := strconv.Atoi(string(sec.Data[kubetypes.KeyCapVer]))
+	if err != nil {
+		log.Warnf("unexpected capability version in proxy's state Secret, expected an integer, got %q", string(sec.Data[kubetypes.KeyCapVer]))
+		return tailcfg.CapabilityVersion(-1)
+	}
+	if !strings.EqualFold(podUID, string(sec.Data[kubetypes.KeyPodUID])) {
+		return tailcfg.CapabilityVersion(-1)
+	}
+	return tailcfg.CapabilityVersion(capVer)
+}

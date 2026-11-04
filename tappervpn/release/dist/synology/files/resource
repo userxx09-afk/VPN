@@ -1,0 +1,11 @@
+{
+	"port-config": {
+		"protocol-file": "conf/TapperVPN.sc"
+	},
+	"usr-local-linker": {
+		"bin": ["bin/tappervpn"]
+	},
+	"syslog-config": {
+		"logrotate-relpath": "conf/logrotate.conf"
+	}
+}

@@ -1,0 +1,13 @@
+[Unit]
+Description=TapperVPN System Tray
+Documentation=https://tailscale.com/kb/1597/linux-systray
+Requires=dbus.service
+After=dbus.service
+PartOf=default.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/tappervpn systray
+
+[Install]
+WantedBy=default.target

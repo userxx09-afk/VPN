@@ -1,18 +1,18 @@
-# Builds the meshwall Android / Fire TV debug APK on Windows.
-# Mirrors the tailscale-android Makefile's `apk` target (which needs Linux/macOS),
+# Builds the TapperVPN Android / Fire TV debug APK on Windows.
+# Mirrors the tappervpn-android Makefile's `apk` target (which needs Linux/macOS),
 # minus stripping debug symbols from libgojni.so.
 #
-# Output: bin\meshwall-debug.apk  (installs on phones and Fire TV)
+# Output: bin	appervpn-debug.apk  (installs on phones and Fire TV)
 param(
-    [switch]$SkipAar,  # reuse the existing android\libs\libtailscale.aar
-    [switch]$Restamp,  # regenerate tailscale.version (after go.mod changes)
+    [switch]$SkipAar,  # reuse the existing android\libs\libtappervpn.aar
+    [switch]$Restamp,  # regenerate tappervpn.version (after go.mod changes)
     # Control server the app signs in to (our Headscale). Use an address every
     # device can reach; give this PC a DHCP reservation so it doesn't change.
     [string]$ControlURL = "http://192.168.5.207:8080"
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
-$app = Join-Path $root "tailscale-android"
+$app = Join-Path $root "tappervpn-android"
 
 # --- Toolchain locations ---------------------------------------------------
 if (-not $env:JAVA_HOME) {
@@ -50,19 +50,27 @@ Write-Host "ANDROID_HOME=$env:ANDROID_HOME"
 
 Push-Location $app
 try {
-    # --- Version stamp (tailscale.version, read by Gradle and the ldflags) ---
+    # --- Version stamp (tappervpn.version, read by Gradle and the ldflags) ---
     # The stamp only changes with go.mod, so reuse it unless -Restamp. (Skipping
     # `go run` also avoids Windows Application Control blocking the freshly
     # built mkversion.exe.)
-    if ($Restamp -or -not (Test-Path tailscale.version)) {
-        & go run tailscale.com/cmd/mkversion | Set-Content -Encoding ascii tailscale.version
+    if ($Restamp -or -not (Test-Path tappervpn.version)) {
+        # mkversion expects the engine in its own git repo; here it's a folder of
+        # this repo, so hand it the version: tappervpn\VERSION.txt + our commit.
+        $hash = (& git -C $root rev-parse HEAD).Trim()
+        $engine = (Get-Content (Join-Path $root "tappervpn\VERSION.txt") -Raw).Trim()
+        $env:TS_VERSION_LONG = "$engine-t$($hash.Substring(0, 9))"
+        $env:TS_VERSION_GIT_HASH = $hash
+        & go run tappervpn.com/cmd/mkversion | Set-Content -Encoding ascii tappervpn.version
+        Remove-Item Env:TS_VERSION_LONG, Env:TS_VERSION_GIT_HASH
         if ($LASTEXITCODE) { throw "mkversion failed" }
     }
     $ver = @{}
-    foreach ($line in Get-Content tailscale.version) {
+    foreach ($line in Get-Content tappervpn.version) {
         if ($line -match '^([A-Z_]+)="?(.*?)"?$') { $ver[$matches[1]] = $matches[2] }
     }
-    Write-Host "Version: $($ver.VERSION_LONG)"
+    $tvVersion = (Get-Content (Join-Path $root "VERSION") -Raw).Trim()
+    Write-Host "Version: TapperVPN $tvVersion (engine $($ver.VERSION_LONG))"
 
     if (-not $SkipAar) {
         # --- gomobile / gobind at the versions pinned in go.mod ---
@@ -76,14 +84,15 @@ try {
         # --- Go library -> AAR ---
         New-Item -ItemType Directory -Force "android\libs" | Out-Null
         $ldflags = "-linkmode=external -extldflags=-Wl,-z,max-page-size=16384 " +
-            "-X tailscale.com/version.longStamp=$($ver.VERSION_LONG) " +
-            "-X tailscale.com/version.shortStamp=$($ver.VERSION_SHORT) " +
-            "-X tailscale.com/version.gitCommitStamp=$($ver.VERSION_GIT_HASH) " +
-            "-X tailscale.com/version.extraGitCommitStamp=$($ver.VERSION_EXTRA_HASH)"
+            "-X tappervpn.com/version.longStamp=$($ver.VERSION_LONG) " +
+            "-X tappervpn.com/version.shortStamp=$($ver.VERSION_SHORT) " +
+            "-X tappervpn.com/version.gitCommitStamp=$($ver.VERSION_GIT_HASH) " +
+            "-X tappervpn.com/version.extraGitCommitStamp=$($ver.VERSION_EXTRA_HASH) " +
+            "-X tappervpn.com/updater.Version=$tvVersion"
         & "$gobin\gomobile.exe" bind -target android -androidapi 26 `
-            -tags "not_tailscale_go ts_omit_cachenetmap" `
+            -tags "not_tappervpn_go ts_omit_cachenetmap" `
             -ldflags $ldflags `
-            -o (Join-Path $app "android\libs\libtailscale.aar") ./libtailscale
+            -o (Join-Path $app "android\libs\libtappervpn.aar") ./libtappervpn
         if ($LASTEXITCODE) { throw "gomobile bind failed" }
     }
 
@@ -97,6 +106,6 @@ try {
         if ($LASTEXITCODE) { throw "gradle assembleDebug failed" }
     } finally { Pop-Location }
 
-    Copy-Item "android\build\outputs\apk\debug\android-debug.apk" (Join-Path $root "bin\meshwall-debug.apk") -Force
-    Write-Host "Built: $root\bin\meshwall-debug.apk"
+    Copy-Item "android\build\outputs\apk\debug\android-debug.apk" (Join-Path $root "bin\tappervpn-debug.apk") -Force
+    Write-Host "Built: $root\bin\tappervpn-debug.apk"
 } finally { Pop-Location }

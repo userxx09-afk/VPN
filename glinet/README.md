@@ -48,6 +48,16 @@ install refuses a package built for the wrong CPU.
 Settings live in `/etc/config/tappervpn` and are kept across upgrades. The
 status box shows `tappervpn status`; logs: `logread -e tappervpn`.
 
+## Updates
+
+With `option auto_update '1'` (the default), cron runs
+`/usr/libexec/tappervpn/update` once a day between 4 and 5 AM. It fetches the
+latest GitHub release, checks `SHA256SUMS.sig` with `usign` against
+`/usr/share/tappervpn/release.pub`, checks the package's hash, and installs
+`tappervpn-glinet-<cpu>.ipk` with opkg. Settings are kept. Run
+`/usr/libexec/tappervpn/update check` to see if an update is waiting; logs:
+`logread -e tappervpn-update`. Set `auto_update` to `0` to turn it off.
+
 ## How it works
 
 - `tappervpnd` is our Tailscale fork built for Linux with only router features

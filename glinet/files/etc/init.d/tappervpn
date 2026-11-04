@@ -9,12 +9,28 @@ PROG=/usr/sbin/tappervpnd
 STATE_DIR=/etc/tappervpn
 RUN_DIR=/var/run/tappervpn
 APPLY=/usr/libexec/tappervpn/apply
+UPDATE=/usr/libexec/tappervpn/update
+CRONTAB=/etc/crontabs/root
+
+# Daily update check at a per-router minute, so routers don't all hit GitHub at once.
+set_update_cron() {
+	local want=$1 line
+	touch "$CRONTAB"
+	sed -i "\#$UPDATE#d" "$CRONTAB"
+	if [ "$want" = 1 ]; then
+		line="$(awk 'BEGIN { srand(); print int(rand() * 60) }') 4 * * * $UPDATE"
+		echo "$line" >>"$CRONTAB"
+	fi
+	/etc/init.d/cron restart 2>/dev/null
+}
 
 start_service() {
 	config_load tappervpn
-	local enabled port
+	local enabled port auto_update
 	config_get_bool enabled main enabled 0
 	config_get port main port 41642
+	config_get_bool auto_update main auto_update 1
+	set_update_cron "$auto_update"
 	[ "$enabled" = 1 ] || {
 		"$APPLY" teardown
 		return 0

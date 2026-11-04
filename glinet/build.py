@@ -23,10 +23,11 @@ import tarfile
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TAILSCALE = os.path.join(ROOT, "tailscale")
+TAPPERVPN = os.path.join(ROOT, "tappervpn")
 FILES = os.path.join(ROOT, "glinet", "files")
 OUT = os.path.join(ROOT, "bin", "glinet")
-VERSION = "0.1.0"
+with open(os.path.join(ROOT, "VERSION")) as _f:
+    VERSION = _f.read().strip()  # repo-root VERSION, shared by every platform
 
 # name -> (GOARCH, extra env, CPUs it is for)
 TARGETS = {
@@ -48,6 +49,7 @@ EXECUTABLES = {
     "usr/sbin/tappervpn",
     "usr/sbin/tappervpnd",
     "usr/libexec/tappervpn/apply",
+    "usr/libexec/tappervpn/update",
 }
 
 POSTINST = """#!/bin/sh
@@ -68,6 +70,7 @@ exit 0
 
 PRERM = """#!/bin/sh
 [ -n "$IPKG_INSTROOT" ] && exit 0
+sed -i "\\#/usr/libexec/tappervpn/update#d" /etc/crontabs/root 2>/dev/null
 /etc/init.d/tappervpn stop
 /etc/init.d/tappervpn disable
 exit 0
@@ -77,7 +80,7 @@ exit 0
 def git_hash():
     try:
         return subprocess.check_output(
-            ["git", "-C", TAILSCALE, "rev-parse", "--short", "HEAD"], text=True
+            ["git", "-C", ROOT, "rev-parse", "--short", "HEAD"], text=True
         ).strip()
     except (OSError, subprocess.CalledProcessError):
         return "unknown"
@@ -86,7 +89,7 @@ def git_hash():
 def build_binaries(names):
     tags = subprocess.check_output(
         ["go", "run", "./cmd/featuretags", "--min", "--add=" + FEATURES],
-        cwd=TAILSCALE, text=True,
+        cwd=TAPPERVPN, text=True,
     ).strip()
     os.makedirs(OUT, exist_ok=True)
     for name in names:
@@ -95,8 +98,8 @@ def build_binaries(names):
         out = os.path.join(OUT, "tappervpnd-" + name)
         print("building", out, flush=True)
         subprocess.check_call(
-            ["go", "build", "-tags=" + tags, "-trimpath", "-ldflags=-s -w", "-o", out, "./cmd/tailscaled"],
-            cwd=TAILSCALE, env=env,
+            ["go", "build", "-tags=" + tags, "-trimpath", "-ldflags=-s -w", "-o", out, "./cmd/tappervpnd"],
+            cwd=TAPPERVPN, env=env,
         )
 
 
@@ -147,8 +150,12 @@ def package(name, version):
             rel = os.path.relpath(full, FILES).replace(os.sep, "/")
             files[rel] = read(full)
     files["usr/sbin/tappervpnd"] = read(binary)
-    with open(os.path.join(TAILSCALE, "LICENSE"), "rb") as f:
+    with open(os.path.join(TAPPERVPN, "LICENSE"), "rb") as f:
         files["usr/share/doc/tappervpn/LICENSE"] = f.read()
+    # For /usr/libexec/tappervpn/update: which release package to fetch, and the
+    # key its signature must verify against.
+    files["usr/share/tappervpn/arch"] = name.encode() + b"\n"
+    files["usr/share/tappervpn/release.pub"] = read(os.path.join(TAPPERVPN, "updater", "release.pub"))
 
     dirs = set()
     for rel in files:

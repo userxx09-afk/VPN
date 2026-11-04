@@ -1,0 +1,63 @@
+#!/bin/sh
+# Copyright (c) Tailscale Inc & contributors
+# SPDX-License-Identifier: BSD-3-Clause
+
+### BEGIN INIT INFO
+# Provides:             tappervpnd
+# Required-Start:
+# Required-Stop:
+# Default-Start:
+# Default-Stop:
+# Short-Description:    TapperVPN Mesh Wireguard VPN
+### END INIT INFO
+
+set -e
+
+# /etc/init.d/tappervpn: start and stop the TapperVPN VPN service
+
+test -x /usr/sbin/tappervpnd || exit 0
+
+umask 022
+
+. /lib/lsb/init-functions
+
+# Are we running from init?
+run_by_init() {
+    ([ "$previous" ] && [ "$runlevel" ]) || [ "$runlevel" = S ]
+}
+
+export PATH="${PATH:+$PATH:}/usr/sbin:/sbin"
+
+case "$1" in
+  start)
+        log_daemon_msg "Starting TapperVPN VPN" "tappervpnd" || true
+        if start-stop-daemon --start --oknodo --name tappervpnd -m --pidfile /run/tappervpnd.pid --background \
+                --exec /usr/sbin/tappervpnd -- \
+                --state=/var/lib/tappervpn/tappervpnd.state \
+                --socket=/run/tappervpn/tappervpnd.sock \
+                --port 41641;
+        then
+            log_end_msg 0 || true
+        else
+            log_end_msg 1 || true
+        fi
+        ;;
+  stop)
+        log_daemon_msg "Stopping TapperVPN VPN" "tappervpnd" || true
+        if start-stop-daemon --stop --remove-pidfile --pidfile /run/tappervpnd.pid --exec /usr/sbin/tappervpnd; then
+            log_end_msg 0 || true
+        else
+            log_end_msg 1 || true
+        fi
+        ;;
+
+  status)
+        status_of_proc -p /run/tappervpnd.pid /usr/sbin/tappervpnd tappervpnd && exit 0 || exit $?
+        ;;
+
+  *)
+        log_action_msg "Usage: /etc/init.d/tappervpnd {start|stop|status}" || true
+        exit 1
+esac
+
+exit 0

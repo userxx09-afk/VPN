@@ -21,18 +21,18 @@ traffic that would otherwise use the gateway.
 
 ## Approach in one paragraph
 
-When a gateway is active, tailscaled already routes *all* of the PC's traffic into
-its tunnel adapter, so every outgoing packet passes through tailscaled in userspace.
+When a gateway is active, tappervpnd already routes *all* of the PC's traffic into
+its tunnel adapter, so every outgoing packet passes through tappervpnd in userspace.
 On the first packet of each new flow we ask Windows which process owns that socket
 (user-mode `GetExtendedTcpTable` / `GetExtendedUdpTable`, no driver), match it against
 the rules, and cache the decision for the flow. `gateway` flows continue to WireGuard
-unchanged. `direct` flows are absorbed into tailscaled's userspace TCP/IP stack
+unchanged. `direct` flows are absorbed into tappervpnd's userspace TCP/IP stack
 (netstack), which re-dials them from a socket pinned to the physical NIC. `block`
 flows are dropped. This works with **no kernel driver**, which is the main reason to
 choose it for v1.
 
 ```
-app ──► Windows TCP/IP ──► Tailscale adapter (wintun) ──► tailscaled
+app ──► Windows TCP/IP ──► TapperVPN adapter (wintun) ──► tappervpnd
                                                           │
                      tstun: PreFilterPacketOutboundToWireGuardNetstackIntercept
                                                           │
@@ -112,7 +112,7 @@ concatenated in policy order, and the first document's `default` / `unidentified
 ### Headscale change needed
 
 Headscale's `nodeAttrs` currently accepts bare capability names (`attr`) only,
-not JSON values (`app`), which Tailscale's own policy format supports. Add it:
+not JSON values (`app`), which TapperVPN's own policy format supports. Add it:
 
 - `headscale/hscontrol/policy/v2/types.go`, `NodeAttrGrant`: add
   `App tailcfg.NodeCapMap \`json:"app,omitempty"\``.
@@ -129,9 +129,9 @@ Policy file then looks like:
 ]
 ```
 
-## Where it plugs into tailscaled
+## Where it plugs into tappervpnd
 
-New package: **`tailscale/feature/approuting`**, registered like the other `feature/*`
+New package: **`tappervpn/feature/approuting`**, registered like the other `feature/*`
 packages (via `feature/condregister`), so it can be compiled out.
 
 | File | Purpose |
@@ -146,7 +146,7 @@ Changes to existing upstream code (kept small so rebasing on upstream stays easy
 | Upstream file | Change |
 |---|---|
 | `wgengine/netstack/netstack.go`, `handleLocalPackets` | In the `default:` branch, call an optional `ns.ClassifyLocalPacket` hook. `direct` falls through to the existing "inject into netstack" path, `block` returns `filter.DropSilently`, and `gateway` returns `filter.Accept` (today's behavior). |
-| `wgengine/netstack/netstack.go` | Set `GetTCPHandlerForFlow` / `GetUDPHandlerForFlow` (only `tsnet` uses them today; tailscaled leaves them nil). For flows marked `direct`, the handler dials the destination with `netns.NewDialer` and splices bytes both ways. **It must not use the default `net.Dialer`.** That would follow the exit-node default route straight back into the tunnel. `netns` sets `IP_UNICAST_IF` to the non-Tailscale default interface. |
+| `wgengine/netstack/netstack.go` | Set `GetTCPHandlerForFlow` / `GetUDPHandlerForFlow` (only `tsnet` uses them today; tappervpnd leaves them nil). For flows marked `direct`, the handler dials the destination with `netns.NewDialer` and splices bytes both ways. **It must not use the default `net.Dialer`.** That would follow the exit-node default route straight back into the tunnel. `netns` sets `IP_UNICAST_IF` to the non-TapperVPN default interface. |
 | `ipn/ipnlocal/local.go` | On netmap change: extract the capability, parse it, and hand it to the feature. Classification only runs while an exit node is selected. |
 | `net/netstat/netstat_windows.go` | Add the UDP table (`GetExtendedUdpTable`). |
 
@@ -179,7 +179,7 @@ reused PID doesn't inherit someone else's rules.
   `unidentified`.
 - **Shared processes:** Windows services hosted in `svchost.exe` all look the same;
   matching them needs service-name lookup (v2).
-- **One gateway at a time.** Tailscale routes 0.0.0.0/0 to a single exit node, so v1
+- **One gateway at a time.** TapperVPN routes 0.0.0.0/0 to a single exit node, so v1
   supports one active gateway. Choosing a gateway per app (app A → node X,
   app B → node Y) would need netstack to proxy those flows to the chosen gateway over
   the mesh (v2+).
@@ -190,7 +190,7 @@ reused PID doesn't inherit someone else's rules.
 
 | Phase | Scope |
 |-------|-------|
-| **v1** | Policy parsing + tests; Windows owner lookup (`exe`/`path`); netstack classifier with `gateway`/`direct`/`block`; local-file policy; `tailscale debug approuting` command to show flows and decisions. |
+| **v1** | Policy parsing + tests; Windows owner lookup (`exe`/`path`); netstack classifier with `gateway`/`direct`/`block`; local-file policy; `tappervpn debug approuting` command to show flows and decisions. |
 | v1.1 | Headscale `nodeAttrs.app` support; policy pushed from the control server. |
 | v2 | `signer` / `package` matchers; svchost service names; DNS through gateway; per-app gateway choice. |
 | v3 | Signed WFP callout driver (`ALE_CONNECT_REDIRECT` / `ALE_BIND_REDIRECT`) so `direct` flows bypass the tunnel in the kernel with no userspace cost. Needs an EV code-signing certificate and Microsoft attestation signing. |
@@ -208,7 +208,7 @@ reused PID doesn't inherit someone else's rules.
 
 ## What was built (v1)
 
-Code: `tailscale/feature/approuting/` (registered on Windows via
+Code: `tappervpn/feature/approuting/` (registered on Windows via
 `feature/condregister/maybe_approuting.go`; can be omitted with `ts_omit_approuting` or
 disabled at runtime with `TS_DISABLE_FEATURE=approuting`).
 
@@ -226,7 +226,7 @@ Differences from the design above:
   edits to carry, and the cheaper PID-only tables are enough.
 - **Two extra netstack changes were needed** (`wgengine/netstack/netstack.go`):
   1. `shouldSendToHost` sends replies on intercepted flows (to one of this node's IPs, from a
-     non-Tailscale address) back to Windows. Without this, replies hit the self-loopback path
+     non-TapperVPN address) back to Windows. Without this, replies hit the self-loopback path
      and never reach the app.
   2. The `GetUDPHandlerForFlow` intercept path now releases the destination address that
      netstack registered for the flow (`forwardUDP` already did); otherwise every distinct
@@ -250,9 +250,9 @@ blocks the netstack test binary from running.
 
 1. Stop the node (Ctrl+C in its window), then start it with a policy:
    `.\scripts\start-node.ps1 -Policy examples\approuting-chrome-only.json -LogFlows`
-2. On a second node, advertise it as a gateway: `tailscale up --advertise-exit-node`, then approve
+2. On a second node, advertise it as a gateway: `tappervpn up --advertise-exit-node`, then approve
    it in Headscale (`nodes list-routes`, `nodes approve-routes`).
-3. On this PC: `bin\tailscale.exe set --exit-node=<gateway>`.
+3. On this PC: `bin\tappervpn.exe set --exit-node=<gateway>`.
 4. Check a what's-my-IP site in Chrome (should show the gateway's IP) and in Edge (should show
    your own). The node window logs each connection's decision.
 
@@ -273,7 +273,7 @@ you set it to `gateway` (use the exit node) or `direct`. Example:
 
 ### How it works
 
-Tailscale sends `0.0.0.0/0` to only one exit node, so additional gateways use **4via6**:
+TapperVPN sends `0.0.0.0/0` to only one exit node, so additional gateways use **4via6**:
 
 1. Each named gateway advertises "all of IPv4 behind site *N*": the route
    `MapVia(N, 0.0.0.0/0)` = `fd7a:115c:a1e0:b1a:0:N::/96` (N is a site ID unique to that
@@ -294,19 +294,19 @@ than guessed. Peers reported offline are skipped.
 On the gateway node (site ID 1 here; use a different number per gateway):
 
 ```bash
-tailscale debug via 1 0.0.0.0/0
+tappervpn debug via 1 0.0.0.0/0
 ```
 
 That prints the route (`fd7a:115c:a1e0:b1a:0:1::/96`). Advertise it, adding it to any routes
 the node already advertises (and keeping `--advertise-exit-node` if it's also an exit node):
 
 ```bash
-tailscale set --advertise-routes=fd7a:115c:a1e0:b1a:0:1::/96
+tappervpn set --advertise-routes=fd7a:115c:a1e0:b1a:0:1::/96
 ```
 
 Approve it on the server: `headscale nodes list-routes`, then `headscale nodes approve-routes`.
 
-On each **client**: `tailscale set --accept-routes`, so WireGuard sends the via range to that
+On each **client**: `tappervpn set --accept-routes`, so WireGuard sends the via range to that
 gateway. (The client-side route hooks are already used by another upstream feature, so the
 policy can't inject them itself.)
 
@@ -315,7 +315,7 @@ policy can't inject them itself.)
 - **IPv4 only.** 4via6 carries IPv4 destinations; IPv6 flows on a named-gateway rule get
   `gatewayUnavailable`.
 - **Still needs an exit node selected on the client.** That's what routes the PC's internet
-  traffic into tailscaled in the first place. Named gateways override it per app.
+  traffic into tappervpnd in the first place. Named gateways override it per app.
 - **The Android/Fire TV app can't advertise routes yet.** Its UI only offers "run as exit
   node", so the Fire TV can be the *selected exit node* today but not a *named* gateway until
   the app gets a setting for it.

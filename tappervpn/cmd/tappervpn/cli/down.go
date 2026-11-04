@@ -1,0 +1,64 @@
+// Copyright (c) Tailscale Inc & contributors
+// SPDX-License-Identifier: BSD-3-Clause
+
+package cli
+
+import (
+	"context"
+	"flag"
+	"fmt"
+
+	"github.com/peterbourgon/ff/v3/ffcli"
+	"tappervpn.com/client/tappervpn/apitype"
+	"tappervpn.com/ipn"
+)
+
+var downCmd = &ffcli.Command{
+	Name:       "down",
+	ShortUsage: "tappervpn down",
+	ShortHelp:  "Disconnect from TapperVPN",
+
+	Exec:    runDown,
+	FlagSet: newDownFlagSet(),
+}
+
+var downArgs struct {
+	acceptedRisks string
+	reason        string
+}
+
+func newDownFlagSet() *flag.FlagSet {
+	downf := newFlagSet("down")
+	downf.StringVar(&downArgs.reason, "reason", "", "reason for the disconnect, if required by a policy")
+	registerAcceptRiskFlag(downf, &downArgs.acceptedRisks)
+	return downf
+}
+
+func runDown(ctx context.Context, args []string) error {
+	if len(args) > 0 {
+		return fmt.Errorf("too many non-flag arguments: %q", args)
+	}
+
+	if isSSHOverTapperVPN() {
+		if err := presentRiskToUser(riskLoseSSH, `You are connected over TapperVPN; this action will disable TapperVPN and result in your session disconnecting.`, downArgs.acceptedRisks); err != nil {
+			return err
+		}
+	}
+
+	st, err := localClient.Status(ctx)
+	if err != nil {
+		return fmt.Errorf("error fetching current status: %w", err)
+	}
+	if st.BackendState == "Stopped" {
+		fmt.Fprintf(Stderr, "TapperVPN was already stopped.\n")
+		return nil
+	}
+	ctx = apitype.RequestReasonKey.WithValue(ctx, downArgs.reason)
+	_, err = localClient.EditPrefs(ctx, &ipn.MaskedPrefs{
+		Prefs: ipn.Prefs{
+			WantRunning: false,
+		},
+		WantRunningSet: true,
+	})
+	return err
+}

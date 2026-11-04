@@ -1,0 +1,4 @@
+[Unit]
+Description=TapperVPN is online
+Requires=tappervpn-wait-online.service
+After=tappervpn-wait-online.service

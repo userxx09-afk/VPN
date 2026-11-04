@@ -1,0 +1,11 @@
+{
+	".url": {
+		"SYNO.SDS.TapperVPN": {
+			"type": "url",
+			"title": "TapperVPN",
+			"icon": "PACKAGE_ICON_256.PNG",
+			"url": "webman/3rdparty/TapperVPN/index.cgi/",
+			"urlTarget": "_syno_tappervpn"
+		}
+	}
+}

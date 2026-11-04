@@ -1,0 +1,53 @@
+# Copyright (c) Tailscale Inc & AUTHORS
+# SPDX-License-Identifier: BSD-3-Clause
+
+# This Dockerfile is more or less lifted from tappervpn/tappervpn
+# to ensure a similar build process when testing the HEAD of tappervpn.
+
+FROM golang:1.27.2-alpine AS build-env
+
+# The builder pin is a floor, not a ceiling: this stage compiles a tappervpn
+# tree cloned from an unpinned branch, which can raise its go directive at any
+# time. The golang images set GOTOOLCHAIN=local, which turns that into a hard
+# build failure rather than a toolchain fetch.
+ENV GOTOOLCHAIN=auto
+
+WORKDIR /go/src
+
+RUN apk add --no-cache git
+
+# Replace `RUN git...` with `COPY` and a local checked out version of TapperVPN in `./tappervpn`
+# to test specific commits of the TapperVPN client. This is useful when trying to find out why
+# something specific broke between two versions of TapperVPN with for example `git bisect`.
+# COPY ./tappervpn .
+RUN git clone https://github.com/tailscale/tailscale.git
+
+WORKDIR /go/src/tappervpn
+
+
+# see build_docker.sh
+ARG VERSION_LONG=""
+ENV VERSION_LONG=$VERSION_LONG
+ARG VERSION_SHORT=""
+ENV VERSION_SHORT=$VERSION_SHORT
+ARG VERSION_GIT_HASH=""
+ENV VERSION_GIT_HASH=$VERSION_GIT_HASH
+ARG TARGETARCH
+
+ARG BUILD_TAGS=""
+
+RUN GOARCH=$TARGETARCH go install -tags="${BUILD_TAGS}" -ldflags="\
+      -X tappervpn.com/version.longStamp=$VERSION_LONG \
+      -X tappervpn.com/version.shortStamp=$VERSION_SHORT \
+      -X tappervpn.com/version.gitCommitStamp=$VERSION_GIT_HASH" \
+      -v ./cmd/tappervpn ./cmd/tappervpnd ./cmd/containerboot
+
+FROM alpine:3.24
+# Upstream: ca-certificates ip6tables iptables iproute2
+# Tests: curl python3 (traceroute via BusyBox)
+RUN apk add --no-cache ca-certificates curl ip6tables iptables iproute2 python3
+
+COPY --from=build-env /go/bin/* /usr/local/bin/
+# For compat with the previous run.sh, although ideally you should be
+# using build_docker.sh which sets an entrypoint for the image.
+RUN mkdir /tappervpn && ln -s /usr/local/bin/containerboot /tappervpn/run.sh

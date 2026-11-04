@@ -1,0 +1,2568 @@
+// Copyright (c) Tailscale Inc & contributors
+// SPDX-License-Identifier: BSD-3-Clause
+
+// Package vmtest provides a high-level framework for running integration tests
+// across multiple QEMU virtual machines connected by natlab's vnet virtual
+// network infrastructure. It supports mixed OS types (gokrazy, Ubuntu, Debian)
+// and multi-NIC configurations for scenarios like subnet routing.
+//
+// See tstest/natlab/README.md for prerequisites and how to run.
+package vmtest
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"net/netip"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/google/gopacket/layers"
+	dto "github.com/prometheus/client_model/go"
+	"github.com/prometheus/common/expfmt"
+	"github.com/prometheus/common/model"
+	"go4.org/mem"
+	"golang.org/x/sync/errgroup"
+	"tappervpn.com/client/local"
+	"tappervpn.com/ipn"
+	"tappervpn.com/ipn/ipnstate"
+	"tappervpn.com/tailcfg"
+	"tappervpn.com/tstest"
+	"tappervpn.com/tstest/integration/testcontrol"
+	"tappervpn.com/tstest/natlab/vnet"
+	"tappervpn.com/types/key"
+	"tappervpn.com/util/mak"
+	"tappervpn.com/util/set"
+)
+
+var (
+	runVMTests     = flag.Bool("run-vm-tests", false, "run tests that require QEMU VMs")
+	verboseVMDebug = flag.Bool("verbose-vm-debug", false, "enable verbose debug logging for VM tests")
+	testVersion    = flag.String("test-version", "", `if non-empty, download tappervpn & tappervpnd at the given release version (e.g. "1.97.255", "unstable", or "stable") instead of building from the source tree`)
+)
+
+// Env is a test environment that manages virtual networks and QEMU VMs.
+// Create one with New, add networks and nodes, then call Start.
+type Env struct {
+	t       testing.TB
+	cfg     vnet.Config
+	server  *vnet.Server
+	nodes   []*Node
+	tempDir string
+
+	sockDir       string // short-path dir for Unix sockets (macOS has 104-byte limit)
+	sockAddr      string // shared Unix socket path for all QEMU netdevs
+	dgramSockAddr string // Unix dgram socket path for macOS VMs (tailmac)
+	binDir        string // directory for compiled binaries
+
+	// testVersion is the resolved TapperVPN release version to use (empty if
+	// building from source). When non-empty, tappervpn and tappervpnd binaries
+	// are downloaded from pkgs.tailscale.com instead of compiled from the tree.
+	testVersion string
+
+	// gokrazyKernel is the path to the gokrazy kernel. It's set by
+	// ensureGokrazy with gokrazyBuildMu held.
+	gokrazyKernel string
+
+	// tailmac-specific paths (macOS VMs)
+	tailmacDir        string // path to tailmac bin/ directory containing Host.app
+	macosSnapshot     string // path to cached macOS VM snapshot directory
+	macosSnapshotOnce sync.Once
+
+	qemuProcs []*exec.Cmd // launched QEMU processes
+
+	sameTailnetUser           bool // all nodes register as the same Tailnet user
+	allOnline                 bool // mark every peer as Online=true in MapResponses
+	peerRelayGrants           bool // grant peer-relay capabilities on the wildcard packet filter
+	selfSignedDERPCertPinning bool // serve test DERP map with sha256-raw cert pins
+	fakeACME                  bool // point tappervpnd at vnet's fake ACME server
+
+	controlDNSDomain string             // MagicDNS domain for the test control server (see ControlDNS)
+	controlDNS       *tailcfg.DNSConfig // DNS config for the test control server (see ControlDNS)
+
+	// Shared resource initialization (sync.Once for things multiple nodes share).
+	vnetOnce      sync.Once
+	qemuSockOnce  sync.Once
+	dgramSockOnce sync.Once
+	compileMu     sync.Mutex
+	compileOnce   map[string]*sync.Once   // keyed by goos_goarch
+	imageOnce     map[string]func() error // keyed by OSImage.Name (cloud and gokrazy images); see prepareImageOnce
+
+	// Web UI support.
+	ctx        context.Context // cancelled when test ends
+	eventBus   *EventBus
+	testStatus *TestStatus
+	stepsMu    sync.Mutex
+	stepsByKey map[string]*Step
+	steps      []*Step
+
+	nodeStatusMu sync.Mutex
+	nodeStatus   map[string]*NodeStatus // keyed by node name
+}
+
+// logVerbosef logs a message only when --verbose-vm-debug is set.
+func (e *Env) logVerbosef(format string, args ...any) {
+	if *verboseVMDebug {
+		e.t.Helper()
+		e.t.Logf(format, args...)
+	}
+}
+
+// vmPlatform defines how a VM type boots. Each OS image type (gokrazy,
+// cloud, macOS) implements this interface.
+type vmPlatform interface {
+	// planSteps registers steps with the web UI in a dry-run pass.
+	planSteps(e *Env, n *Node)
+
+	// boot does everything needed to get this node running: ensure images,
+	// compile binaries, set up sockets, launch VM. Called concurrently.
+	boot(ctx context.Context, e *Env, n *Node) error
+}
+
+// platform returns the vmPlatform for this node's OS type.
+func (n *Node) platform() vmPlatform {
+	if n.os.IsMacOS {
+		return macPlatform{}
+	}
+	if n.os.IsGokrazy {
+		return gokrazyPlatform{}
+	}
+	return qemuCloudPlatform{}
+}
+
+// AddStep declares an expected stage of the test. The web UI shows all steps
+// from the start, tracking their progress. Call before or during the test.
+// Returns a *Step whose Begin/End methods drive the progress display.
+func (e *Env) AddStep(name string) *Step {
+	s := &Step{
+		name:  name,
+		index: len(e.steps),
+		env:   e,
+	}
+	e.steps = append(e.steps, s)
+	return s
+}
+
+// Step returns a step by key, creating it if it doesn't exist.
+// Safe for concurrent use. Both planSteps (dry-run) and boot (real-run)
+// call this to get the same Step object.
+func (e *Env) Step(key string) *Step {
+	e.stepsMu.Lock()
+	defer e.stepsMu.Unlock()
+	if s, ok := e.stepsByKey[key]; ok {
+		return s
+	}
+	s := &Step{
+		name:  key,
+		index: len(e.steps),
+		env:   e,
+	}
+	e.steps = append(e.steps, s)
+	if e.stepsByKey == nil {
+		e.stepsByKey = make(map[string]*Step)
+	}
+	e.stepsByKey[key] = s
+	return s
+}
+
+// Steps returns all declared steps in order.
+func (e *Env) Steps() []*Step {
+	return e.steps
+}
+
+// publishStepChange publishes a step status change event.
+func (e *Env) publishStepChange(s *Step) {
+	e.eventBus.Publish(VMEvent{
+		Type:    EventStepChanged,
+		Message: fmt.Sprintf("%s %s", s.Status().Icon(), s.name),
+		Step:    s,
+	})
+}
+
+// initNodeStatus initializes the NodeStatus for all nodes. Called after
+// AddNode but before Start so the web UI can render them.
+func (e *Env) initNodeStatus() {
+	e.nodeStatusMu.Lock()
+	defer e.nodeStatusMu.Unlock()
+	for _, n := range e.nodes {
+		nics := make([]NICStatus, len(n.nets))
+		for i := range n.nets {
+			nics[i] = NICStatus{
+				NetName: e.nicLabel(n, i),
+				DHCP:    "waiting",
+			}
+		}
+		e.nodeStatus[n.name] = &NodeStatus{
+			Name:         n.name,
+			OS:           n.os.Name,
+			NICs:         nics,
+			JoinsTailnet: n.joinTailnet,
+			TapperVPN:    "--",
+		}
+	}
+}
+
+// nicLabel returns a short human-readable label for a node's i-th NIC.
+// After Start(), we can use the assigned LAN IP. Before that, we use "NIC N".
+func (e *Env) nicLabel(n *Node, i int) string {
+	if n.vnetNode != nil {
+		ip := n.vnetNode.LanIP(n.nets[i])
+		if ip.IsValid() {
+			return ip.String()
+		}
+	}
+	return fmt.Sprintf("NIC %d", i)
+}
+
+// getNodeStatus returns the current status for a node.
+func (e *Env) getNodeStatus(name string) NodeStatus {
+	e.nodeStatusMu.Lock()
+	defer e.nodeStatusMu.Unlock()
+	ns := e.nodeStatus[name]
+	if ns == nil {
+		return NodeStatus{Name: name, TapperVPN: "--"}
+	}
+	return *ns
+}
+
+// setNodeDHCP updates the DHCP status for a specific NIC on a node.
+func (e *Env) setNodeDHCP(name string, nicIdx int, status string) {
+	e.nodeStatusMu.Lock()
+	ns := e.nodeStatus[name]
+	if ns != nil && nicIdx < len(ns.NICs) {
+		ns.NICs[nicIdx].DHCP = status
+	}
+	e.nodeStatusMu.Unlock()
+}
+
+// setNodeTapperVPN updates the TapperVPN status for a node and publishes
+// an event so the web UI updates via WebSocket.
+func (e *Env) setNodeTapperVPN(name, status string) {
+	e.nodeStatusMu.Lock()
+	ns := e.nodeStatus[name]
+	if ns != nil {
+		ns.TapperVPN = status
+	}
+	e.nodeStatusMu.Unlock()
+	e.eventBus.Publish(VMEvent{
+		NodeName: name,
+		Type:     EventTapperVPN,
+		Message:  "TapperVPN: " + status,
+		Detail:   status,
+	})
+}
+
+// appendConsoleLine adds a line to a node's console buffer.
+func (e *Env) appendConsoleLine(name, line string) {
+	e.nodeStatusMu.Lock()
+	ns := e.nodeStatus[name]
+	if ns != nil {
+		ns.Console = append(ns.Console, line)
+		if len(ns.Console) > maxConsoleLines {
+			ns.Console = ns.Console[len(ns.Console)-maxConsoleLines:]
+		}
+	}
+	e.nodeStatusMu.Unlock()
+}
+
+// nicIndexForMAC returns the NIC index (0-based) for a given MAC on a node.
+// Returns -1 if not found.
+func (e *Env) nicIndexForMAC(name string, mac vnet.MAC) int {
+	for _, n := range e.nodes {
+		if n.name != name {
+			continue
+		}
+		for i := range n.nets {
+			if n.vnetNode.NICMac(i) == mac {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// nodeNameByNum returns the node name for a given vnet node number.
+func (e *Env) nodeNameByNum(num int) string {
+	for _, n := range e.nodes {
+		if n.num == num {
+			return n.name
+		}
+	}
+	return fmt.Sprintf("node%d", num)
+}
+
+// New creates a new test environment. It skips the test if --run-vm-tests is
+// not set. opts may contain [EnvOption] values returned by helpers like
+// [SameTailnetUser].
+func New(t testing.TB, opts ...EnvOption) *Env {
+	if !*runVMTests {
+		t.Skip("skipping VM test; set --run-vm-tests to run")
+	}
+
+	tempDir := t.TempDir()
+
+	// Unix sockets have a short path limit (104 bytes on macOS). The Go
+	// test TempDir path easily exceeds that, so create a dedicated short
+	// directory under /tmp for sockets.
+	sockDir, err := os.MkdirTemp("", "vmtest")
+	if err != nil {
+		t.Fatalf("creating socket tempdir: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(sockDir) })
+
+	e := &Env{
+		t:          t,
+		tempDir:    tempDir,
+		sockDir:    sockDir,
+		binDir:     filepath.Join(tempDir, "bin"),
+		eventBus:   newEventBus(),
+		testStatus: newTestStatus(),
+		nodeStatus: make(map[string]*NodeStatus),
+	}
+	for _, o := range opts {
+		o.applyTo(e)
+	}
+	t.Cleanup(func() {
+		if t.Failed() {
+			e.dumpNodeLogs()
+		}
+		e.testStatus.finish(t.Failed())
+		e.eventBus.Publish(VMEvent{
+			Type:    EventTestStatus,
+			Message: e.testStatus.State(),
+			Detail:  formatDuration(e.testStatus.Elapsed()),
+		})
+	})
+	return e
+}
+
+// dumpNodeLogs writes the tail of each node's tappervpnd logs, as uploaded
+// to the fake log catcher, to the test log. It runs on test failure. The
+// VM console log dumped by [dumpLogTail] holds only kernel and init output;
+// on gokrazy the processes' own output goes to a remote syslog that the
+// virtual network discards, so this is the only view of what tappervpnd
+// was doing.
+func (e *Env) dumpNodeLogs() {
+	if e.server == nil {
+		return
+	}
+	// Nodes run tappervpnd and upload its logs whether or not they joined
+	// the tailnet or have an agent, so dump them all. A node that uploaded
+	// nothing gets a one-line note.
+	for _, n := range e.nodes {
+		dumpTail(e.t, n.name, "tappervpnd (via logcatcher)", []byte(e.server.NodeLogs(n.vnetNode)), 100)
+	}
+}
+
+// EnvOption configures an [Env] in [New].
+type EnvOption interface {
+	applyTo(*Env)
+}
+
+type envOptFunc func(*Env)
+
+func (f envOptFunc) applyTo(e *Env) { f(e) }
+
+// SameTailnetUser returns an [EnvOption] that makes every node register with
+// the test control server as the same Tailnet user. This is needed for
+// cross-node features that require a same-user relationship — Taildrop, for
+// example.
+func SameTailnetUser() EnvOption {
+	return envOptFunc(func(e *Env) { e.sameTailnetUser = true })
+}
+
+// AllOnline returns an [EnvOption] that makes the test control server mark
+// every peer as Online=true in MapResponses (testcontrol.Server.AllOnline).
+// Several disco-key handling fast paths in the controlclient and wgengine
+// only fire when the peer is reported online; without this option those
+// paths are silently skipped, which can mask bugs and slow down recovery
+// from disco-key rotations.
+func AllOnline() EnvOption {
+	return envOptFunc(func(e *Env) { e.allOnline = true })
+}
+
+// PeerRelayGrants returns an [EnvOption] that makes the test control server
+// grant [tailcfg.PeerCapabilityRelay] and [tailcfg.PeerCapabilityRelayTarget]
+// on the wildcard packet filter (testcontrol.Server.PeerRelayGrants). Without
+// those capabilities, magicsock does not consider any peer a candidate
+// peer-relay server, so a node that has [ipn.Prefs.RelayServerPort] set
+// cannot actually be used as a relay by its peers.
+func PeerRelayGrants() EnvOption {
+	return envOptFunc(func(e *Env) { e.peerRelayGrants = true })
+}
+
+// SelfSignedDERPCertPinning returns an [EnvOption] that makes the test control
+// server advertise a DERP map whose nodes use CertName="sha256-raw:<hex>"
+// pinning against the self-signed certs vnet's fake DERP servers serve. This
+// exercises the sha256-raw verification path end-to-end (in tappervpnd and in
+// `tappervpn debug derp`) without involving a real CA.
+func SelfSignedDERPCertPinning() EnvOption {
+	return envOptFunc(func(e *Env) { e.selfSignedDERPCertPinning = true })
+}
+
+// FakeACME returns an [EnvOption] that points nodes at vnet's in-process ACME
+// CA and configures the test control server to advertise MagicDNS cert domains.
+func FakeACME() EnvOption {
+	return envOptFunc(func(e *Env) { e.fakeACME = true })
+}
+
+// ControlDNS returns an [EnvOption] that makes the test control server send
+// the given DNS configuration in MapResponses, with node names placed under
+// the given MagicDNS domain (e.g. "tailnet.test").
+func ControlDNS(magicDNSDomain string, cfg *tailcfg.DNSConfig) EnvOption {
+	return envOptFunc(func(e *Env) {
+		e.controlDNSDomain = magicDNSDomain
+		e.controlDNS = cfg
+	})
+}
+
+// AddNetwork creates a new virtual network. Arguments follow the same pattern as
+// vnet.Config.AddNetwork (string IPs, NAT types, NetworkService values).
+func (e *Env) AddNetwork(opts ...any) *vnet.Network {
+	return e.cfg.AddNetwork(opts...)
+}
+
+// FirstNetwork returns the first existing network. If no network exists, it
+// returns nil.
+func (e *Env) FirstNetwork() *vnet.Network {
+	return e.cfg.FirstNetwork()
+}
+
+// RegisterFile registers a file with the vnet fileserver.
+// It is served at http://files.tappervpn/<path>.
+func (e *Env) RegisterFile(path string, data []byte) {
+	if e.server == nil {
+		e.t.Fatalf("RegisterFile called before Start")
+	}
+	e.server.RegisterFile(path, data)
+}
+
+// Node represents a virtual machine in the test environment.
+type Node struct {
+	name string
+	num  int // assigned during AddNode
+
+	os               OSImage
+	nets             []*vnet.Network
+	vnetNode         *vnet.Node // primary vnet node (set during Start)
+	agent            *vnet.NodeAgentClient
+	joinTailnet      bool
+	runSSH           bool // true to enable the node's TapperVPN SSH server
+	noAgent          bool // true to skip TTA agent setup (e.g. macOS VMs without TTA)
+	systemdUnit      bool // true to run tappervpnd via the stock systemd unit (Linux cloud VMs only)
+	advertiseRoutes  string
+	snatSubnetRoutes *bool // nil means default (true)
+	webServerPort    int
+	sshPort          int        // host port for SSH debug access (cloud VMs only)
+	dnsMode          DNSMode    // desired Linux DNS backend to provision; "" means the image default
+	qmpPath          string     // socket path for talking to the QEMU process for the node
+	dhcpClient       DHCPClient // DHCP client for the vnet NIC; "" means the image default
+}
+
+// AddNode creates a new VM node. The name is used for identification and as the
+// webserver greeting. Options can be *vnet.Network (for network attachment),
+// NodeOption values, or vnet node options (like vnet.TapperVPNdEnv).
+func (e *Env) AddNode(name string, opts ...any) *Node {
+	n := &Node{
+		name:        name,
+		os:          Gokrazy, // default
+		joinTailnet: true,
+	}
+	e.nodes = append(e.nodes, n)
+
+	// Separate network options from other options.
+	var vnetOpts []any
+	for _, o := range opts {
+		switch o := o.(type) {
+		case *vnet.Network:
+			n.nets = append(n.nets, o)
+			vnetOpts = append(vnetOpts, o)
+		case nodeOptOS:
+			n.os = OSImage(o)
+		case nodeOptNoTapperVPN:
+			n.joinTailnet = false
+			vnetOpts = append(vnetOpts, vnet.DontJoinTailnet)
+		case nodeOptTapperVPNSSH:
+			n.runSSH = true
+		case nodeOptNoAgent:
+			n.noAgent = true
+		case nodeOptSystemdUnit:
+			n.systemdUnit = true
+		case nodeOptAdvertiseRoutes:
+			n.advertiseRoutes = string(o)
+		case nodeOptSNATSubnetRoutes:
+			v := bool(o)
+			n.snatSubnetRoutes = &v
+		case nodeOptWebServer:
+			n.webServerPort = int(o)
+		case nodeOptDNSMode:
+			switch DNSMode(o) {
+			case DNSDefault, DNSDirect, DNSOpenresolv:
+			default:
+				e.t.Fatalf("AddNode(%q): unsupported DNSMode %q", name, DNSMode(o))
+			}
+			n.dnsMode = DNSMode(o)
+		case nodeOptDHCPClient:
+			switch c := DHCPClient(o); c {
+			case DHCPClientDefault, DHCPClientDhcpcd:
+				n.dhcpClient = c
+			default:
+				e.t.Fatalf("AddNode(%q): unsupported DHCPClient %q", name, c)
+			}
+		default:
+			// Pass through to vnet (TapperVPNdEnv, NodeOption, MAC, etc.)
+			vnetOpts = append(vnetOpts, o)
+		}
+	}
+	if n.dhcpClient == DHCPClientDhcpcd {
+		// Only this image is known to ship dhcpcd-base, and the dhcpcd.conf
+		// written by dhcpcdFiles names the single vnet NIC.
+		if n.os.Name != Ubuntu2404.Name {
+			e.t.Fatalf("AddNode(%q): DHCPClientDhcpcd requires the %s image, got %s", name, Ubuntu2404.Name, n.os.Name)
+		}
+		if len(n.nets) != 1 {
+			e.t.Fatalf("AddNode(%q): DHCPClientDhcpcd requires exactly one network, got %d", name, len(n.nets))
+		}
+	}
+	if e.fakeACME {
+		vnetOpts = append(vnetOpts, vnet.TapperVPNdEnv{
+			Key:   "TS_DEBUG_ACME_DIRECTORY_URL",
+			Value: "http://acme.example/directory",
+		})
+	}
+	if !n.os.IsGokrazy && !n.os.IsMacOS {
+		// Only gokrazy builds trust the fake log catcher's TLS cert, so other
+		// guests upload over plain HTTP. The address is a literal so uploads
+		// keep working while a test breaks the guest's DNS. macOS guests are
+		// left out because tailmac does not pass TapperVPNdEnv to tappervpnd.
+		vnetOpts = append(vnetOpts, vnet.TapperVPNdEnv{
+			Key:   "TS_LOG_TARGET",
+			Value: "http://" + vnet.FakeLogCatcherIPv4().String(),
+		})
+	}
+
+	if n.systemdUnit && (n.os.IsGokrazy || n.os.GOOS() != "linux") {
+		e.t.Fatalf("SystemdUnit is only supported on Linux cloud VMs; node %s is %s", name, n.os.Name)
+	}
+
+	// macOS VMs require a macOS arm64 host (Apple Virtualization.framework via
+	// tailmac). Skip the test now rather than letting it proceed through the
+	// rest of the setup only to fail later.
+	if n.os.IsMacOS && (runtime.GOOS != "darwin" || runtime.GOARCH != "arm64") {
+		e.t.Skipf("macOS VM tests require a macOS arm64 host (got %s/%s)", runtime.GOOS, runtime.GOARCH)
+	}
+
+	// Linux cloud images must declare a family; it drives distro-specific
+	// cloud-init provisioning. gokrazy and non-Linux images don't use that path.
+	if n.os.isLinuxCloudImage() && n.os.Family == "" {
+		e.t.Fatalf("AddNode(%q): Linux cloud image %q has no LinuxFamily set", name, n.os.Name)
+	}
+
+	n.vnetNode = e.cfg.AddNode(vnetOpts...)
+	n.num = n.vnetNode.Num()
+	// VMTEST_VERBOSE_SYSLOG=1 logs each node's remote syslog (the stdout
+	// and stderr of tappervpnd and the other guest processes) into the
+	// test output as it arrives. It is the natlab equivalent of
+	// tstest/integration/nat's --log-tappervpnd flag and is the way to
+	// watch a guest live; on failure the tail of tappervpnd's logs is
+	// dumped regardless, from the fake log catcher.
+	if os.Getenv("VMTEST_VERBOSE_SYSLOG") == "1" {
+		n.vnetNode.SetVerboseSyslog(true)
+	}
+	return n
+}
+
+// Name returns the name of the Node.
+func (n *Node) Name() string {
+	return n.name
+}
+
+// LanIP returns the LAN IPv4 address of this node on the given network.
+// This is only valid after Env.Start() has been called.
+// Name returns the node's name as set in [Env.AddNode].
+func (n *Node) LanIP(net *vnet.Network) netip.Addr {
+	return n.vnetNode.LanIP(net)
+}
+
+// NodeOption types for configuring nodes.
+type nodeOptOS OSImage
+type nodeOptNoTapperVPN struct{}
+type nodeOptTapperVPNSSH struct{}
+type nodeOptNoAgent struct{}
+type nodeOptSystemdUnit struct{}
+type nodeOptAdvertiseRoutes string
+type nodeOptSNATSubnetRoutes bool
+type nodeOptWebServer int
+type nodeOptDNSMode DNSMode
+type nodeOptDHCPClient DHCPClient
+
+// DHCPClient says which DHCP client configures the guest's vnet NIC.
+type DHCPClient string
+
+const (
+	// DHCPClientDefault leaves the image's networking alone, so the NIC is
+	// configured by whatever the image runs by default (systemd-networkd on
+	// the cloud images).
+	DHCPClientDefault DHCPClient = ""
+
+	// DHCPClientDhcpcd makes systemd-networkd leave the vnet NIC unmanaged and
+	// runs the dhcpcd that the Ubuntu 24.04 image ships (dhcpcd-base) on it
+	// instead. dhcpcd configures the lease's address and routes itself, then
+	// runs its hook scripts. The resolv.conf hook calls resolvconf when one
+	// is installed, registering a snippet named "<interface>.dhcp", and
+	// writes /etc/resolv.conf directly otherwise. Combine with
+	// [DNSOpenresolv] so the hook registers the snippet instead of writing
+	// resolv.conf.
+	//
+	// Only supported on [Ubuntu2404] nodes with a single network.
+	DHCPClientDhcpcd DHCPClient = "dhcpcd"
+)
+
+// DNSMode is a provisioning directive, not a DNS-backend name: it says what, if
+// anything, to do to the guest's DNS before tappervpnd starts, letting one
+// distro image cover multiple backends. DNSDefault leaves DNS untouched (the
+// resulting backend is image-dependent); the other modes provision the guest to
+// force a specific backend, and are named to match the mode strings in
+// net/dns/manager_linux.go so the result can be checked with
+// [Env.AssertDNSBackend].
+type DNSMode string
+
+const (
+	// DNSDefault leaves the image's DNS configuration untouched, so the backend
+	// is whatever the image runs by default (typically systemd-resolved on
+	// modern distros). It has no [Env.AssertDNSBackend] counterpart because the
+	// result isn't forced.
+	DNSDefault DNSMode = ""
+
+	// DNSDirect masks systemd-resolved and installs a plain /etc/resolv.conf
+	// so tappervpnd selects the "direct" manager (rewrites resolv.conf itself).
+	DNSDirect DNSMode = "direct"
+
+	// DNSOpenresolv masks systemd-resolved and installs upstream openresolv
+	// (which no cloud image ships), so tappervpnd selects the "openresolv"
+	// manager. Its key directory is created empty, so unless [WithDHCPClient]
+	// selects a client whose resolv.conf hook registers a snippet, the only
+	// one ever registered is TapperVPN's own. Before the fix for
+	// tappervpn/tappervpn#20825, tappervpnd handled an empty key directory
+	// wrong: openresolv reports "no snippets" by exiting 2, and net/dns
+	// treated that non-zero exit as a hard failure.
+	//
+	// openresolv's sources are vendored into the tree; see openresolv.go.
+	DNSOpenresolv DNSMode = "openresolv"
+)
+
+// OS returns a NodeOption that sets the node's operating system image.
+func OS(img OSImage) nodeOptOS { return nodeOptOS(img) }
+
+// DontJoinTailnet returns a NodeOption that prevents the node from running tappervpn up.
+func DontJoinTailnet() nodeOptNoTapperVPN { return nodeOptNoTapperVPN{} }
+
+// TapperVPNSSH returns a NodeOption that enables the node's TapperVPN SSH
+// server by passing --ssh to tappervpn up. If any node has this option, the
+// test control server is configured with a permissive SSH policy that lets
+// any tailnet node connect as any SSH user, mapped to the same-named local
+// user.
+func TapperVPNSSH() nodeOptTapperVPNSSH { return nodeOptTapperVPNSSH{} }
+
+// NoAgent returns a NodeOption that skips TTA agent setup. The node will not
+// have a test agent, so agent-dependent operations (Status, ExecOnNode, etc.)
+// won't work. Useful for VMs that just need to boot and respond to ICMP.
+func NoAgent() nodeOptNoAgent { return nodeOptNoAgent{} }
+
+// SystemdUnit returns a NodeOption that makes the node run tappervpnd via the
+// stock systemd unit that Linux packages ship (cmd/tappervpnd/tappervpnd.service
+// with cmd/tappervpnd/tappervpnd.defaults as its EnvironmentFile), instead of
+// launching tappervpnd directly as a background process. This exercises the
+// unit's sandboxing directives and its Type=notify readiness handshake.
+// It is only supported on Linux cloud VMs (e.g. Ubuntu, Debian).
+func SystemdUnit() nodeOptSystemdUnit { return nodeOptSystemdUnit{} }
+
+// AdvertiseRoutes returns a NodeOption that configures the node to advertise
+// the given routes (comma-separated CIDRs) when joining the tailnet.
+func AdvertiseRoutes(routes string) nodeOptAdvertiseRoutes {
+	return nodeOptAdvertiseRoutes(routes)
+}
+
+// SNATSubnetRoutes returns a NodeOption that sets whether the node should
+// source NAT traffic to advertised subnet routes. The default is true.
+// Setting this to false preserves original source IPs, which is needed
+// for site-to-site configurations.
+func SNATSubnetRoutes(v bool) nodeOptSNATSubnetRoutes { return nodeOptSNATSubnetRoutes(v) }
+
+// WebServer returns a NodeOption that starts a webserver on the given port.
+// The webserver responds with "Hello world I am <nodename> from <sourceIP>" on all requests.
+func WebServer(port int) nodeOptWebServer { return nodeOptWebServer(port) }
+
+// WithDNSMode returns a NodeOption that provisions the (Linux) node so
+// tappervpnd selects the given DNS backend. Only meaningful for Linux cloud
+// images; ignored for gokrazy/macOS. See [DNSMode].
+func WithDNSMode(m DNSMode) nodeOptDNSMode { return nodeOptDNSMode(m) }
+
+// WithDHCPClient returns a NodeOption that provisions the node so the given
+// DHCP client configures its vnet NIC. See [DHCPClient].
+func WithDHCPClient(c DHCPClient) nodeOptDHCPClient { return nodeOptDHCPClient(c) }
+
+// Start initializes the virtual network, boots all VMs in parallel, and waits
+// for all TTA agents to connect. It should be called after all AddNetwork/AddNode calls.
+func (e *Env) Start() {
+	t := e.t
+
+	// Give bring-up (image build, boot, agent wait) a generous budget measured
+	// from now. We deliberately do NOT derive this from the test deadline: on
+	// CI, per-test timeouts can be tight (a few minutes), and reserving headroom
+	// under the deadline was observed to steal time bring-up legitimately needs,
+	// failing slow-but-healthy runs. If bring-up genuinely exceeds this, the
+	// `go test -timeout` panic is an acceptable (if blunt) backstop.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	t.Cleanup(cancel)
+	e.ctx = ctx
+
+	e.initNodeStatus()
+	e.maybeStartWebServer()
+
+	if err := os.MkdirAll(e.binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if *testVersion != "" {
+		v, err := resolveTestVersion(ctx, *testVersion)
+		if err != nil {
+			t.Fatalf("resolving --test-version=%q: %v", *testVersion, err)
+		}
+		e.testVersion = v
+		t.Logf("using TapperVPN release version %s (from --test-version=%q)", v, *testVersion)
+	}
+
+	// Dry-run: let each platform register its steps with the web UI.
+	userSteps := e.steps
+	e.steps = nil
+	for _, n := range e.nodes {
+		n.platform().planSteps(e, n)
+	}
+	for _, n := range e.nodes {
+		if !n.noAgent {
+			e.Step("Wait for agent: " + n.name)
+		}
+		if n.joinTailnet {
+			e.Step("TapperVPN up: " + n.name)
+		}
+	}
+	for _, s := range userSteps {
+		s.index = len(e.steps)
+		e.steps = append(e.steps, s)
+	}
+
+	// Boot all nodes in parallel. Each platform handles its own
+	// dependencies (image prep, binary compilation, socket setup)
+	// via sync.Once, so independent work overlaps naturally.
+	//
+	// Under TCG, concurrent boots oversubscribe the host CPUs and a heavy
+	// guest can starve its siblings past the stuck-detector; serialize boots
+	// there so each clears that gate before the next starts. KVM stays parallel.
+	var bootEg errgroup.Group
+	if !hardwareAccelAvailable() {
+		bootEg.SetLimit(1)
+	}
+	for _, n := range e.nodes {
+		bootEg.Go(func() error {
+			return n.platform().boot(ctx, e, n)
+		})
+	}
+	if err := bootEg.Wait(); err != nil {
+		t.Fatalf("boot: %v", err)
+	}
+
+	// Set up agent clients and wait for all agents to connect.
+	for _, n := range e.nodes {
+		if n.noAgent {
+			continue
+		}
+		e.initVnet() // ensure vnet is ready for agent clients
+		n.agent = e.server.NodeAgentClient(n.vnetNode)
+		n.vnetNode.SetClient(n.agent)
+	}
+
+	var agentEg errgroup.Group
+	for _, n := range e.nodes {
+		if n.noAgent {
+			continue
+		}
+		agentEg.Go(func() error {
+			aStep := e.Step("Wait for agent: " + n.name)
+			aStep.Begin()
+			t.Logf("[%s] waiting for agent...", n.name)
+			if n.joinTailnet {
+				// gokrazy starts tta and tappervpnd concurrently. If tta wins,
+				// it answers 502 until tappervpnd.sock exists.
+				var st *ipnstate.Status
+				if err := tstest.WaitFor(tappervpnUpTimeout, func() error {
+					var statusErr error
+					st, statusErr = n.agent.Status(ctx)
+					return statusErr
+				}); err != nil {
+					return fmt.Errorf("[%s] agent status: %w", n.name, err)
+				}
+				t.Logf("[%s] agent connected, backend state: %s", n.name, st.BackendState)
+			} else {
+				if err := e.WaitForAgentConn(ctx, n); err != nil {
+					return fmt.Errorf("[%s] agent connect: %w", n.name, err)
+				}
+				t.Logf("[%s] agent connected (no tappervpn)", n.name)
+			}
+			aStep.End(nil)
+
+			if n.vnetNode.HostFirewall() {
+				if err := n.agent.EnableHostFirewall(ctx); err != nil {
+					return fmt.Errorf("[%s] enable firewall: %w", n.name, err)
+				}
+			}
+
+			if n.joinTailnet {
+				tsStep := e.Step("TapperVPN up: " + n.name)
+				tsStep.Begin()
+				// Bound "tappervpn up" more tightly than the overall
+				// test context. It normally completes in about a second
+				// against the in-process control server, so a node that
+				// is stuck here should fail promptly, with its logs
+				// dumped, rather than hang until go test's timeout panic,
+				// which dumps nothing useful about the node.
+				upCtx, upCancel := context.WithTimeout(ctx, tappervpnUpTimeout)
+				err := e.tappervpnUp(upCtx, n)
+				upCancel()
+				if err != nil {
+					return fmt.Errorf("[%s] tappervpn up (limit %v): %w", n.name, tappervpnUpTimeout, err)
+				}
+				st2, err := n.agent.Status(ctx)
+				if err != nil {
+					return fmt.Errorf("[%s] status after up: %w", n.name, err)
+				}
+				if st2.BackendState != "Running" {
+					return fmt.Errorf("[%s] state = %q, want Running", n.name, st2.BackendState)
+				}
+
+				// Apply any capabilities for the node to the map.
+				// SetNodeCapMap pushes an updated map response immediately, then wait
+				// until the node reports the capability in its status.
+				if cm := n.vnetNode.WantCapMap(); cm != nil {
+					e.server.ControlServer().SetNodeCapMap(st2.Self.PublicKey, cm)
+					if err := tstest.WaitFor(15*time.Second, func() error {
+						st, err := n.agent.Status(ctx)
+						if err != nil {
+							return err
+						}
+						if st.Self == nil {
+							return fmt.Errorf("self is nil")
+						}
+						for c := range cm {
+							if !st.Self.HasCap(c) {
+								return fmt.Errorf("cap %v not yet received", c)
+							}
+						}
+						return nil
+					}); err != nil {
+						return fmt.Errorf("[%s] waiting for capabilities: %w", n.name, err)
+					}
+				}
+
+				ips := fmt.Sprintf("%v", st2.Self.TapperVPNIPs)
+				e.setNodeTapperVPN(n.name, "Running "+ips)
+				t.Logf("[%s] up with %v", n.name, st2.Self.TapperVPNIPs)
+				tsStep.End(nil)
+			}
+
+			return nil
+		})
+	}
+	if err := agentEg.Wait(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Start webservers.
+	for _, n := range e.nodes {
+		if n.webServerPort > 0 {
+			if err := e.startWebServer(ctx, n); err != nil {
+				t.Fatalf("startWebServer(%s): %v", n.name, err)
+			}
+		}
+	}
+}
+
+// tappervpnUpTimeout bounds one node's "tappervpn up" in [Env.Start]
+// and the initial agent.Status.
+// It is far above the roughly one second the command takes against the
+// in-process control server, and far below the test's overall context.
+const tappervpnUpTimeout = 90 * time.Second
+
+// tappervpnUp runs "tappervpn up" on the node via TTA.
+func (e *Env) tappervpnUp(ctx context.Context, n *Node) error {
+	url := "http://unused/up?accept-routes=true"
+	if n.advertiseRoutes != "" {
+		url += "&advertise-routes=" + n.advertiseRoutes
+	}
+	if n.runSSH {
+		url += "&ssh=true"
+	}
+	if n.snatSubnetRoutes != nil {
+		if *n.snatSubnetRoutes {
+			url += "&snat-subnet-routes=true"
+		} else {
+			url += "&snat-subnet-routes=false"
+		}
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return err
+	}
+	res, err := n.agent.HTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	if res.StatusCode != 200 {
+		return fmt.Errorf("tappervpn up: %s: %s", res.Status, body)
+	}
+	return nil
+}
+
+// startWebServer tells TTA on the node to start a webserver.
+func (e *Env) startWebServer(ctx context.Context, n *Node) error {
+	url := fmt.Sprintf("http://unused/start-webserver?port=%d&name=%s", n.webServerPort, n.name)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return err
+	}
+	res, err := n.agent.HTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != 200 {
+		body, _ := io.ReadAll(res.Body)
+		return fmt.Errorf("start-webserver: %s: %s", res.Status, body)
+	}
+	e.t.Logf("[%s] webserver started on port %d", n.name, n.webServerPort)
+	return nil
+}
+
+// SetExitNode sets the client node's exit node to use for internet traffic.
+// If exitNode is nil, the client's exit node is cleared (i.e., turned off).
+// Otherwise exitNode must be a tailnet node with an approved 0.0.0.0/0 (and
+// ::/0) route, typically configured via [AdvertiseRoutes] and
+// [Env.ApproveRoutes].
+func (e *Env) SetExitNode(client, exitNode *Node) {
+	e.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var ip netip.Addr
+	if exitNode != nil {
+		st, err := exitNode.agent.Status(ctx)
+		if err != nil {
+			e.t.Fatalf("SetExitNode: status for %s: %v", exitNode.name, err)
+		}
+		if len(st.Self.TapperVPNIPs) == 0 {
+			e.t.Fatalf("SetExitNode: %s has no TapperVPN IPs", exitNode.name)
+		}
+		ip = st.Self.TapperVPNIPs[0]
+	}
+
+	if _, err := client.agent.EditPrefs(ctx, &ipn.MaskedPrefs{
+		Prefs: ipn.Prefs{
+			ExitNodeID: "",
+			ExitNodeIP: ip,
+		},
+		ExitNodeIDSet: true,
+		ExitNodeIPSet: true,
+	}); err != nil {
+		e.t.Fatalf("SetExitNode(%s -> %v): %v", client.name, exitNode, err)
+	}
+	if exitNode == nil {
+		e.t.Logf("[%s] cleared exit node", client.name)
+	} else {
+		e.t.Logf("[%s] using exit node %s (%v)", client.name, exitNode.name, ip)
+	}
+}
+
+// SetExitNodeIP sets the client's ExitNodeIP preference directly, by IP.
+// This is the right helper for plain-WireGuard exit nodes (Mullvad-style)
+// that aren't on the tailnet — pass an invalid netip.Addr{} to clear.
+// For tailnet exit nodes whose TapperVPN IP is discoverable via TTA, use
+// [Env.SetExitNode] instead.
+func (e *Env) SetExitNodeIP(client *Node, ip netip.Addr) {
+	e.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := client.agent.EditPrefs(ctx, &ipn.MaskedPrefs{
+		Prefs: ipn.Prefs{
+			ExitNodeID: "",
+			ExitNodeIP: ip,
+		},
+		ExitNodeIDSet: true,
+		ExitNodeIPSet: true,
+	}); err != nil {
+		e.t.Fatalf("SetExitNodeIP(%s, %v): %v", client.name, ip, err)
+	}
+	if !ip.IsValid() {
+		e.t.Logf("[%s] cleared exit node", client.name)
+	} else {
+		e.t.Logf("[%s] using exit-node IP %v", client.name, ip)
+	}
+}
+
+// ControlServer returns the underlying test control server, for tests that
+// need to inject custom peers, masquerade pairs, etc. The returned server's
+// Node store is shared with the running tailnet, so changes take effect on
+// the next netmap update sent to peers.
+func (e *Env) ControlServer() *testcontrol.Server {
+	return e.server.ControlServer()
+}
+
+// FakeACMERootPEM returns the root certificate for vnet's fake ACME CA.
+func (e *Env) FakeACMERootPEM() []byte {
+	e.initVnet()
+	return e.server.FakeACMERootPEM()
+}
+
+// BringUpMullvadWGServer brings up a userspace WireGuard server on n,
+// configured as a single-peer "Mullvad-style" exit-node target. The
+// server runs inside n's TTA process on a Linux TUN named "wg0".
+//
+// gw is the WG interface address (e.g. 10.64.0.1/24). The server listens
+// on listenPort, accepts only the single peer whose public key is peerPub
+// at peerAllowedIP, and MASQUERADEs egress traffic from masqSrc so that
+// decrypted packets from the peer egress with n's WAN IP.
+//
+// It returns the freshly generated public key of the WG server, which
+// the caller must pin as the peer key on the [tailcfg.Node] it injects
+// into the netmap to advertise this server as a plain-WireGuard exit
+// node. It fatals the test on error.
+func (e *Env) BringUpMullvadWGServer(n *Node, gw netip.Prefix, listenPort uint16, peerPub key.NodePublic, peerAllowedIP, masqSrc netip.Prefix) key.NodePublic {
+	e.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	peerPubRaw := peerPub.Raw32()
+	v := url.Values{
+		"addr":            {gw.String()},
+		"listen-port":     {strconv.Itoa(int(listenPort))},
+		"peer-pub-b64":    {base64.StdEncoding.EncodeToString(peerPubRaw[:])},
+		"peer-allowed-ip": {peerAllowedIP.String()},
+		"masq-src":        {masqSrc.String()},
+	}
+	reqURL := "http://unused/wg-server-up?" + v.Encode()
+	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
+	if err != nil {
+		e.t.Fatalf("BringUpMullvadWGServer: %v", err)
+	}
+	res, err := n.agent.HTTPClient.Do(req)
+	if err != nil {
+		e.t.Fatalf("BringUpMullvadWGServer(%s): %v", n.name, err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	if res.StatusCode != 200 {
+		e.t.Fatalf("BringUpMullvadWGServer(%s): %s: %s", n.name, res.Status, body)
+	}
+	var pubB64 string
+	for line := range strings.SplitSeq(string(body), "\n") {
+		if s, ok := strings.CutPrefix(strings.TrimSpace(line), "PUBKEY="); ok {
+			pubB64 = s
+			break
+		}
+	}
+	if pubB64 == "" {
+		e.t.Fatalf("BringUpMullvadWGServer(%s): no PUBKEY in response: %q", n.name, body)
+	}
+	pubRaw, err := base64.StdEncoding.DecodeString(pubB64)
+	if err != nil || len(pubRaw) != 32 {
+		e.t.Fatalf("BringUpMullvadWGServer(%s): bad PUBKEY %q: %v", n.name, pubB64, err)
+	}
+	return key.NodePublicFromRaw32(mem.B(pubRaw))
+}
+
+// Status returns the tappervpn status of the given node, fetched from its
+// TTA agent. It fatals the test on error.
+func (e *Env) Status(n *Node) *ipnstate.Status {
+	e.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	st, err := n.agent.Status(ctx)
+	if err != nil {
+		e.t.Fatalf("Status(%s): %v", n.name, err)
+	}
+	return st
+}
+
+// NodeLogs returns the tappervpnd log lines the node has uploaded to the fake
+// log catcher so far, oldest first, each prefixed with the client's
+// timestamp. Uploads are batched, so lines tappervpnd wrote recently may be
+// missing.
+func (e *Env) NodeLogs(n *Node) string {
+	return e.server.NodeLogs(n.vnetNode)
+}
+
+// ClientMetrics returns the client metrics exported by the given node.
+func (e *Env) ClientMetrics(n *Node) ClientMetrics {
+	e.t.Helper()
+	raw, err := n.Agent().DaemonMetrics(e.t.Context())
+	if err != nil {
+		e.t.Fatalf("Node %q DaemonMetrics: %v", n.Name(), err)
+	}
+
+	// Metrics are reported in Prometheus exposition format.
+	// prometheus/common v0.67 made the validation scheme mandatory;
+	// the zero-value parser now panics. LegacyValidation matches the
+	// classic ASCII metric/label name rules that the tappervpnd
+	// client exporter uses.
+	parser := expfmt.NewTextParser(model.LegacyValidation)
+	mfs, err := parser.TextToMetricFamilies(bytes.NewReader(raw))
+	if err != nil {
+		e.t.Fatalf("Node %q parse client metrics: %v", n.Name(), err)
+	}
+
+	// TapperVPN client metrics are all unlabelled integer-valued counters and
+	// gauges, so we don't need to handle the full generality of the Prometheus
+	// representation. If we see anything else, we'll log and skip it.
+	out := make(ClientMetrics)
+	for _, mf := range mfs {
+		name := mf.GetName()
+		if _, ok := out[name]; ok {
+			e.t.Logf("Node %q: duplicate client metric %q (ignored)", n.Name(), name)
+			continue
+		} else if len(mf.Metric) != 1 {
+			e.t.Logf("Node %q: got %d values for client metric %q, want 1 (ignored)", n.Name(), len(mf.Metric), name)
+			continue
+		}
+
+		var mtype string
+		var value int64
+		switch mf.GetType() {
+		case dto.MetricType_COUNTER:
+			mtype = "counter"
+			value = int64(mf.Metric[0].GetCounter().GetValue())
+		case dto.MetricType_GAUGE:
+			mtype = "gauge"
+			value = int64(mf.Metric[0].GetGauge().GetValue())
+		default:
+			e.t.Logf("Node %q unexpected client metric %q type %q (ignored)", n.Name(), name, mf.GetType().String())
+			continue
+		}
+		out[name] = ClientMetric{
+			Name:  name,
+			Type:  mtype,
+			Value: value,
+		}
+	}
+	return out
+}
+
+// dnsBackendMetricPrefix is the prefix of the clientmetric gauge that
+// tappervpnd sets to 1 for the Linux DNS mode it selected. See
+// net/dns/manager_linux.go.
+const dnsBackendMetricPrefix = "dns_manager_linux_mode_"
+
+// DNSBackend returns the Linux DNS backend ("mode") the node's tappervpnd
+// selected (e.g. "systemd-resolved", "direct"). tappervpnd sets a single gauge
+// named dns_manager_linux_mode_<mode> to 1 for its selected mode (see
+// net/dns/manager_linux.go); this finds that gauge and returns <mode>. It fails
+// the test if none is set (non-Linux node, or DNS not yet configured).
+func (e *Env) DNSBackend(n *Node) string {
+	e.t.Helper()
+	for name, m := range e.ClientMetrics(n) {
+		mode, ok := strings.CutPrefix(name, dnsBackendMetricPrefix)
+		if !ok || m.Value != 1 {
+			continue
+		}
+		// tappervpnd sanitizes "-" to "_" when forming the metric name;
+		// reverse it so we return net/dns's spelling ("systemd-resolved").
+		return strings.ReplaceAll(mode, "_", "-")
+	}
+	e.t.Fatalf("Node %q: no %s* gauge set (non-Linux node, or DNS not yet configured)", n.Name(), dnsBackendMetricPrefix)
+	return ""
+}
+
+// AssertDNSBackend fails the test unless the node's selected Linux DNS backend
+// matches want (see [Env.DNSBackend] for the mode strings). Use it in distro
+// tests to prove the node exercises the intended DNS manager.
+func (e *Env) AssertDNSBackend(n *Node, want string) {
+	e.t.Helper()
+	if got := e.DNSBackend(n); got != want {
+		e.t.Fatalf("Node %q: DNS backend = %q, want %q", n.Name(), got, want)
+	}
+}
+
+// ClientMetrics is a view of the client metrics exported by a node.
+// The keys of the map are the metric names.
+type ClientMetrics map[string]ClientMetric
+
+// ClientMetric is a view of a node client metric.
+type ClientMetric struct {
+	Name  string // as published to the clientmetrics package
+	Type  string // either "gauge" or "counter"
+	Value int64  // the gauge or counter value
+}
+
+// SetAcceptRoutes toggles the node's RouteAll preference (the
+// --accept-routes flag), controlling whether it installs subnet routes
+// advertised by peers.
+func (e *Env) SetAcceptRoutes(n *Node, on bool) {
+	e.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if _, err := n.agent.EditPrefs(ctx, &ipn.MaskedPrefs{
+		Prefs:       ipn.Prefs{RouteAll: on},
+		RouteAllSet: true,
+	}); err != nil {
+		e.t.Fatalf("SetAcceptRoutes(%s, %v): %v", n.name, on, err)
+	}
+	e.t.Logf("[%s] accept-routes=%v", n.name, on)
+}
+
+// SetAcceptDNS toggles the node's CorpDNS preference (the --accept-dns flag),
+// controlling whether it applies the DNS configuration control sends it.
+//
+// Toggling it off and back on makes tappervpnd tear down and reapply its whole
+// DNS configuration, including re-reading the OS's own config, without
+// rebooting the guest. A test can therefore change the OS resolver state
+// mid-run and be sure tappervpnd re-reads it.
+func (e *Env) SetAcceptDNS(n *Node, on bool) {
+	e.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if _, err := n.agent.EditPrefs(ctx, &ipn.MaskedPrefs{
+		Prefs:      ipn.Prefs{CorpDNS: on},
+		CorpDNSSet: true,
+	}); err != nil {
+		e.t.Fatalf("SetAcceptDNS(%s, %v): %v", n.name, on, err)
+	}
+	e.t.Logf("[%s] accept-dns=%v", n.name, on)
+}
+
+// ApproveRoutes tells the test control server to approve subnet routes
+// for the given node. The routes should be CIDR strings.
+func (e *Env) ApproveRoutes(n *Node, routes ...string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Get the node's public key from its status.
+	st, err := n.agent.Status(ctx)
+	if err != nil {
+		e.t.Fatalf("ApproveRoutes: status for %s: %v", n.name, err)
+	}
+	nodeKey := st.Self.PublicKey
+
+	var prefixes []netip.Prefix
+	for _, r := range routes {
+		p, err := netip.ParsePrefix(r)
+		if err != nil {
+			e.t.Fatalf("ApproveRoutes: bad route %q: %v", r, err)
+		}
+		prefixes = append(prefixes, p)
+	}
+
+	// Enable --accept-routes on all other tappervpn nodes BEFORE setting the
+	// routes on the control server. This way, when the map update arrives with
+	// the new peer routes, peers will immediately install them.
+	for _, other := range e.nodes {
+		if other == n || !other.joinTailnet {
+			continue
+		}
+		if _, err := other.agent.EditPrefs(ctx, &ipn.MaskedPrefs{
+			Prefs:       ipn.Prefs{RouteAll: true},
+			RouteAllSet: true,
+		}); err != nil {
+			e.t.Fatalf("ApproveRoutes: set accept-routes on %s: %v", other.name, err)
+		}
+	}
+
+	// Approve the routes on the control server. SetSubnetRoutes notifies all
+	// peers via updatePeerChanged, so they'll re-fetch their MapResponse.
+	e.server.ControlServer().SetSubnetRoutes(nodeKey, prefixes)
+
+	// Wait for each peer to see the routes.
+	for _, r := range routes {
+		for _, other := range e.nodes {
+			if other == n || !other.joinTailnet {
+				continue
+			}
+			if !e.waitForPeerRoute(other, r, 15*time.Second) {
+				e.DumpStatus(other)
+				e.t.Fatalf("ApproveRoutes: %s never saw route %s", other.name, r)
+			}
+		}
+	}
+	e.t.Logf("approved routes %v on %s", routes, n.name)
+
+	// Ping the advertiser from each peer to establish WireGuard tunnels.
+	for _, other := range e.nodes {
+		if other == n || !other.joinTailnet {
+			continue
+		}
+		e.ping(other, n)
+	}
+}
+
+// ping does a disco ping from one node to another's TapperVPN IP, retrying
+// for up to 30 seconds, fataling on failure. It is used internally to wake
+// up magicsock peer state before a test runs; tests that want to assert
+// connectivity should use [Env.Ping] with the appropriate ping type and
+// timeout.
+func (e *Env) ping(from, to *Node) {
+	e.t.Helper()
+	if err := e.Ping(from, to, tailcfg.PingDisco, 30*time.Second); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+// Ping pings from one node to another's TapperVPN IP using the given ping
+// type, retrying until it succeeds or timeout expires. It returns the error
+// from the last attempt if the timeout expires. Unlike the internal ping
+// helper, it does not fatal the test on failure; callers can check the error
+// to assert on timing.
+//
+// [tailcfg.PingTSMP] actually flows packets across the WireGuard tunnel and is
+// the right choice for asserting end-to-end connectivity.
+// [tailcfg.PingDisco] only exchanges disco messages between magicsock layers
+// and is useful for warming up peer state without requiring a working tunnel.
+func (e *Env) Ping(from, to *Node, ptype tailcfg.PingType, timeout time.Duration) error {
+	e.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	toSt, err := to.agent.Status(ctx)
+	if err != nil {
+		return fmt.Errorf("ping: can't get %s status: %w", to.name, err)
+	}
+	if len(toSt.Self.TapperVPNIPs) == 0 {
+		return fmt.Errorf("ping: %s has no TapperVPN IPs", to.name)
+	}
+	targetIP := toSt.Self.TapperVPNIPs[0]
+
+	var lastErr error
+	for {
+		// Per-attempt timeout: cap at 3s but never exceed the remaining budget.
+		attemptTimeout := 3 * time.Second
+		if d := time.Until(deadline(ctx)); d < attemptTimeout {
+			attemptTimeout = d
+		}
+		if attemptTimeout <= 0 {
+			break
+		}
+		pingCtx, pingCancel := context.WithTimeout(ctx, attemptTimeout)
+		pr, err := from.agent.PingWithOpts(pingCtx, targetIP, ptype, local.PingOpts{})
+		pingCancel()
+		if err == nil && pr.Err == "" {
+			e.logVerbosef("ping(%s): %s -> %s OK", ptype, from.name, targetIP)
+			return nil
+		}
+		switch {
+		case err != nil:
+			lastErr = err
+		case pr.Err != "":
+			lastErr = fmt.Errorf("%s", pr.Err)
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if lastErr == nil {
+		lastErr = ctx.Err()
+	}
+	return fmt.Errorf("ping(%s): %s -> %s (%s) timed out after %v: %w", ptype, from.name, to.name, targetIP, timeout, lastErr)
+}
+
+// deadline returns ctx's deadline, or a zero Time if it has none.
+func deadline(ctx context.Context) time.Time {
+	d, _ := ctx.Deadline()
+	return d
+}
+
+// PeerDiscoKey returns n's view of the given peer's disco key. It returns a
+// non-nil error if the LocalAPI request fails (e.g. tappervpnd briefly
+// unavailable during a restart). It returns (zero, false, nil) if n is
+// reachable but has no record of the given peer in its current netmap.
+//
+// PeerDiscoKey is suitable for use inside a [tstest.WaitFor] poll loop: it
+// does not fatal the test on transient errors.
+//
+// The disco key is fetched from the debug-only "peer-disco-keys" LocalAPI
+// action ([ipnlocal.LocalBackend.DebugPeerDiscoKeys]) rather than via
+// [ipnstate.Status], to keep the production PeerStatus struct free of disco
+// keys (and free of non-comparable fields like [key.DiscoPublic] that break
+// reflect-based test helpers).
+func (e *Env) PeerDiscoKey(n *Node, peer key.NodePublic) (key.DiscoPublic, bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	got, err := n.agent.DebugResultJSON(ctx, "peer-disco-keys")
+	if err != nil {
+		return key.DiscoPublic{}, false, err
+	}
+	// DebugResultJSON returns the result as a generic any (the body is
+	// re-decoded into any), so the map comes back keyed by string text-
+	// encoded node keys. Re-marshal+unmarshal into a typed map for cleaner
+	// lookup. (Roundtripping through JSON is fine for a test helper.)
+	raw, err := json.Marshal(got)
+	if err != nil {
+		return key.DiscoPublic{}, false, fmt.Errorf("re-marshal: %w", err)
+	}
+	var m map[key.NodePublic]key.DiscoPublic
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return key.DiscoPublic{}, false, fmt.Errorf("unmarshal peer-disco-keys: %w", err)
+	}
+	d, ok := m[peer]
+	return d, ok, nil
+}
+
+// RotateDiscoKey asks tappervpnd on n to rotate its discovery (magicsock) key
+// in place via the LocalAPI debug action. The node key, control connection,
+// and other tappervpnd state are unaffected. It fatals the test on error.
+func (e *Env) RotateDiscoKey(n *Node) {
+	e.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := n.agent.DebugAction(ctx, "rotate-disco-key"); err != nil {
+		e.t.Fatalf("RotateDiscoKey(%s): %v", n.name, err)
+	}
+}
+
+// ForcePreferredDERP pins n's home DERP to the given region via the
+// "force-prefer-derp" debug action, so its reported NetInfo.PreferredDERP is
+// deterministic. The force lives on the long-lived magicsock.Conn and so
+// persists across an in-process profile switch. It fatals the test on error.
+func (e *Env) ForcePreferredDERP(n *Node, region tailcfg.DERPRegionID) {
+	e.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	b, err := json.Marshal(region)
+	if err != nil {
+		e.t.Fatalf("ForcePreferredDERP(%s): %v", n.name, err)
+	}
+	if err := n.agent.DebugActionBody(ctx, "force-prefer-derp", bytes.NewReader(b)); err != nil {
+		e.t.Fatalf("ForcePreferredDERP(%s, %d): %v", n.name, region, err)
+	}
+}
+
+// Relogin switches n to a fresh login profile on the same test control server,
+// in-process (no daemon restart), so it comes up under a NEW node identity while
+// keeping the same long-lived magicsock.Conn. This is the control-client swap
+// that an interactive login or profile switch performs, and is what the
+// home-DERP re-report fix guards (see [magicsock.Conn.ResetNetInfoLast]).
+//
+// It switches to an empty profile (the in-process control-client swap the
+// LocalAPI PUT /profiles/ performs) and then logs back in with "tappervpn up",
+// which both points the new control client at the test control and drives
+// registration to completion. It waits for the node to return to Running and
+// fatals the test on error.
+func (e *Env) Relogin(n *Node) {
+	e.t.Helper()
+	// Generous timeout: the profile switch triggers a fresh registration +
+	// netcheck + DERP connect, which is slow under TCG (no KVM).
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+
+	// Switch to a fresh, empty login profile. This runs the in-process control-
+	// client swap (resetForProfileChangeLocked -> setControlClientLocked) that
+	// clears the home-DERP dedup cache under test, while preserving the existing
+	// magicsock.Conn (and any forced home DERP from [Env.ForcePreferredDERP]).
+	if err := n.agent.SwitchToEmptyProfile(ctx); err != nil {
+		e.t.Fatalf("Relogin(%s): SwitchToEmptyProfile: %v", n.name, err)
+	}
+	// Log back in to the same test control. "tappervpn up --login-server" points
+	// the new control client at the test control and drives registration to
+	// completion (testcontrol auto-authorizes), the same path Env.Start uses.
+	if err := e.tappervpnUp(ctx, n); err != nil {
+		e.t.Fatalf("Relogin(%s): up: %v", n.name, err)
+	}
+	if err := tstest.WaitFor(60*time.Second, func() error {
+		st, err := n.agent.Status(ctx)
+		if err != nil {
+			return err
+		}
+		if st.BackendState != "Running" {
+			return fmt.Errorf("backend state = %q, want Running", st.BackendState)
+		}
+		return nil
+	}); err != nil {
+		e.t.Fatalf("Relogin(%s): %v", n.name, err)
+	}
+}
+
+// RestartTapperVPNd signals tappervpnd on n to die so that its supervisor
+// (gokrazy) restarts it. It then waits for tappervpnd to come back to the
+// "Running" backend state. It fatals the test on error.
+//
+// Restarting tappervpnd is currently only supported on gokrazy nodes.
+func (e *Env) RestartTapperVPNd(n *Node) {
+	e.t.Helper()
+	if !n.os.IsGokrazy {
+		e.t.Fatalf("RestartTapperVPNd(%s): only supported on gokrazy nodes (have %q)", n.name, n.os.Name)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", "http://unused/restart-tappervpnd", nil)
+	if err != nil {
+		e.t.Fatalf("RestartTapperVPNd(%s): %v", n.name, err)
+	}
+	res, err := n.agent.HTTPClient.Do(req)
+	if err != nil {
+		e.t.Fatalf("RestartTapperVPNd(%s): %v", n.name, err)
+	}
+	body, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	if res.StatusCode != 200 {
+		e.t.Fatalf("RestartTapperVPNd(%s): %s: %s", n.name, res.Status, body)
+	}
+	e.t.Logf("[%s] %s", n.name, strings.TrimSpace(string(body)))
+
+	// Wait for tappervpnd to come back. Status calls will fail while the unix
+	// socket is gone, then return Starting/NeedsLogin briefly before settling
+	// on Running.
+	if err := tstest.WaitFor(45*time.Second, func() error {
+		st, err := n.agent.Status(ctx)
+		if err != nil {
+			return err
+		}
+		if st.BackendState != "Running" {
+			return fmt.Errorf("backend state = %q", st.BackendState)
+		}
+		return nil
+	}); err != nil {
+		e.t.Fatalf("RestartTapperVPNd(%s): waiting for Running: %v", n.name, err)
+	}
+}
+
+// AddRoute adds a kernel static route on the given node, pointing prefix at
+// via. It uses TTA's /add-route handler, so it works on any node where TTA
+// is running (which is all of them — DontJoinTailnet only skips
+// `tappervpn up`; the agent runs regardless). Currently Linux-only in TTA.
+//
+// It fatals the test on error.
+func (e *Env) AddRoute(n *Node, prefix, via string) {
+	e.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	reqURL := fmt.Sprintf("http://unused/add-route?prefix=%s&via=%s", prefix, via)
+	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
+	if err != nil {
+		e.t.Fatalf("AddRoute: %v", err)
+	}
+	resp, err := n.agent.HTTPClient.Do(req)
+	if err != nil {
+		e.t.Fatalf("AddRoute(%s, %s → %s): %v", n.name, prefix, via, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		e.t.Fatalf("AddRoute(%s, %s → %s): %s: %s", n.name, prefix, via, resp.Status, body)
+	}
+}
+
+// SSHExec runs a command on a cloud VM via its debug SSH NIC.
+// Only works for cloud VMs that have the debug NIC and SSH key configured.
+// Returns stdout and any error.
+//
+// SSH transport-level errors (exit code 255: connection refused, auth
+// failure, etc.) are retried for up to ~30s to absorb the race window
+// between Env.Start() returning (when tta reports the tappervpn backend
+// as Running) and cloud-init finishing the user/SSH-key setup. The remote
+// command's own non-zero exit codes are returned to the caller without
+// retry.
+func (e *Env) SSHExec(n *Node, cmd string) (string, error) {
+	if n.sshPort == 0 {
+		return "", fmt.Errorf("node %s has no SSH debug port", n.name)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		sshCmd := exec.Command("ssh",
+			"-o", "StrictHostKeyChecking=no",
+			"-o", "UserKnownHostsFile=/dev/null",
+			"-o", "BatchMode=yes",
+			"-o", "ConnectTimeout=5",
+			"-o", "LogLevel=ERROR",
+			"-i", "/tmp/vmtest_key",
+			"-p", fmt.Sprintf("%d", n.sshPort),
+			"root@127.0.0.1",
+			cmd)
+		out, err := sshCmd.CombinedOutput()
+		if err == nil {
+			return string(out), nil
+		}
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 255 {
+			return string(out), err
+		}
+		if time.Now().After(deadline) {
+			return string(out), err
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// DumpStatus logs the tappervpn status of a node, including its peers and their
+// AllowedIPs. Useful for debugging routing issues.
+func (e *Env) DumpStatus(n *Node) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	st, err := n.agent.Status(ctx)
+	if err != nil {
+		e.t.Logf("[%s] DumpStatus error: %v", n.name, err)
+		return
+	}
+	var selfAllowed []string
+	if st.Self.AllowedIPs != nil {
+		for i := range st.Self.AllowedIPs.Len() {
+			selfAllowed = append(selfAllowed, st.Self.AllowedIPs.At(i).String())
+		}
+	}
+	var selfPrimary []string
+	if st.Self.PrimaryRoutes != nil {
+		for i := range st.Self.PrimaryRoutes.Len() {
+			selfPrimary = append(selfPrimary, st.Self.PrimaryRoutes.At(i).String())
+		}
+	}
+	e.t.Logf("[%s] self: %v, backend=%s, AllowedIPs=%v, PrimaryRoutes=%v", n.name, st.Self.TapperVPNIPs, st.BackendState, selfAllowed, selfPrimary)
+	for _, peer := range st.Peer {
+		var aips []string
+		if peer.AllowedIPs != nil {
+			for i := range peer.AllowedIPs.Len() {
+				aips = append(aips, peer.AllowedIPs.At(i).String())
+			}
+		}
+		e.t.Logf("[%s] peer %s (%s): AllowedIPs=%v, Online=%v, Relay=%q, CurAddr=%q",
+			n.name, peer.HostName, peer.TapperVPNIPs,
+			aips, peer.Online, peer.Relay, peer.CurAddr)
+	}
+}
+
+// waitForPeerRoute polls the node's status until it sees the given route prefix
+// in a peer's AllowedIPs, or until timeout. Returns true if found.
+func (e *Env) waitForPeerRoute(n *Node, prefix string, timeout time.Duration) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	for {
+		st, err := n.agent.Status(ctx)
+		if err != nil {
+			return false
+		}
+		for _, peer := range st.Peer {
+			if peer.AllowedIPs != nil {
+				for i := range peer.AllowedIPs.Len() {
+					if peer.AllowedIPs.At(i).String() == prefix {
+						return true
+					}
+				}
+			}
+		}
+		if ctx.Err() != nil {
+			return false
+		}
+		time.Sleep(time.Second)
+	}
+}
+
+// HTTPGet makes an HTTP GET request from the given node to the specified URL.
+// The request is proxied through TTA's /http-get handler.
+func (e *Env) HTTPGet(from *Node, targetURL string) string {
+	for attempt := range 3 {
+		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		reqURL := "http://unused/http-get?url=" + targetURL
+		req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
+		if err != nil {
+			cancel()
+			e.t.Fatalf("HTTPGet: %v", err)
+		}
+		res, err := from.agent.HTTPClient.Do(req)
+		cancel()
+		if err != nil {
+			e.logVerbosef("HTTPGet attempt %d from %s: %v", attempt+1, from.name, err)
+			continue
+		}
+		body, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		if res.StatusCode == http.StatusBadGateway || res.StatusCode == http.StatusServiceUnavailable {
+			e.t.Logf("HTTPGet attempt %d from %s: status %d, body: %s", attempt+1, from.name, res.StatusCode, string(body))
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		return string(body)
+	}
+	e.t.Fatalf("HTTPGet from %s to %s: all attempts failed", from.name, targetURL)
+	return ""
+}
+
+// HTTPResponse is the result of a successful [Env.HTTPGetStatus] call.
+type HTTPResponse struct {
+	// Status is the upstream HTTP status code.
+	Status int
+	// Body is the upstream response body.
+	Body string
+	// SetCookies is the parsed list of cookies the upstream set, if any.
+	SetCookies []*http.Cookie
+}
+
+// HTTPGetStatus is like [Env.HTTPGet] but returns the upstream HTTP status
+// code, body, and any Set-Cookie response cookies, so callers can assert on
+// rejection responses (e.g. 401, 403) and drive multi-request flows that need
+// cookie continuity (e.g. session-based authentication).
+//
+// Any sendCookies are sent on the upstream request via the Cookie header.
+//
+// The request is proxied through TTA's /http-get handler, which dials via
+// TapperVPN's UserDial; this works on any OS the test agent runs on.
+//
+// Like [Env.HTTPGet], HTTPGetStatus retries up to 3 times on TTA-level
+// connection failures (502 / 503 from TTA when it cannot reach upstream).
+// Upstream responses (including 4xx) are returned to the caller without retry.
+func (e *Env) HTTPGetStatus(from *Node, targetURL string, sendCookies ...*http.Cookie) (*HTTPResponse, error) {
+	cookieHeader := ""
+	if len(sendCookies) > 0 {
+		parts := make([]string, 0, len(sendCookies))
+		for _, c := range sendCookies {
+			parts = append(parts, c.Name+"="+c.Value)
+		}
+		cookieHeader = strings.Join(parts, "; ")
+	}
+
+	var lastErr error
+	for attempt := range 3 {
+		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		reqURL := "http://unused/http-get?url=" + url.QueryEscape(targetURL)
+		req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
+		if err != nil {
+			cancel()
+			return nil, err
+		}
+		if cookieHeader != "" {
+			req.Header.Set("Cookie", cookieHeader)
+		}
+		res, err := from.agent.HTTPClient.Do(req)
+		cancel()
+		if err != nil {
+			e.logVerbosef("HTTPGetStatus attempt %d from %s: %v", attempt+1, from.name, err)
+			lastErr = err
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		b, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		// A bare 502/503 with no X-Upstream-Status means TTA itself couldn't
+		// reach upstream; retry. If the header is set, the upstream really
+		// did answer with that status and we should pass it through.
+		if (res.StatusCode == http.StatusBadGateway || res.StatusCode == http.StatusServiceUnavailable) &&
+			res.Header.Get("X-Upstream-Status") == "" {
+			e.logVerbosef("HTTPGetStatus attempt %d from %s: TTA %d: %s", attempt+1, from.name, res.StatusCode, string(b))
+			lastErr = fmt.Errorf("TTA %d: %s", res.StatusCode, strings.TrimSpace(string(b)))
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		return &HTTPResponse{
+			Status:     res.StatusCode,
+			Body:       string(b),
+			SetCookies: res.Cookies(),
+		}, nil
+	}
+	return nil, fmt.Errorf("HTTPGetStatus from %s to %s: gave up: %w", from.name, targetURL, lastErr)
+}
+
+// TapperVPN runs the tappervpn CLI on the given node via TTA.
+func (e *Env) TapperVPN(n *Node, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	q := url.Values{}
+	for _, arg := range args {
+		q.Add("arg", arg)
+	}
+	// http.Transport transparently replays a GET whose reused conn hits EOF
+	// before the response, which would run the command twice. This is not
+	// safe to do since not all tappervpn commands are idempotent.
+	// Use POST to avoid these retries.
+	req, err := http.NewRequestWithContext(ctx, "POST", "http://unused/tappervpn?"+q.Encode(), nil)
+	if err != nil {
+		return "", err
+	}
+	res, err := n.agent.HTTPClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	if res.StatusCode != http.StatusOK {
+		return string(body), fmt.Errorf("tappervpn %q: %s: %s", args, res.Status, res.Header.Get("Exec-Err"))
+	}
+	return string(body), nil
+}
+
+// GokrazyRoot returns the kernel root= argument from a Gokrazy node.
+func (e *Env) GokrazyRoot(n *Node) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", "http://unused/gokrazy-root", nil)
+	if err != nil {
+		return "", err
+	}
+	res, err := n.agent.HTTPClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	if res.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("gokrazy-root: %s: %s", res.Status, strings.TrimSpace(string(body)))
+	}
+	return strings.TrimSpace(string(body)), nil
+}
+
+// setNodeScreenshot stores the latest screenshot data URI for a node.
+func (e *Env) setNodeScreenshot(name, dataURI string) {
+	e.nodeStatusMu.Lock()
+	if ns := e.nodeStatus[name]; ns != nil {
+		ns.Screenshot = dataURI
+	}
+	e.nodeStatusMu.Unlock()
+}
+
+// setNodeScreenshotPort stores the Host.app screenshot server port for a node.
+func (e *Env) setNodeScreenshotPort(name string, port int) {
+	e.nodeStatusMu.Lock()
+	if ns := e.nodeStatus[name]; ns != nil {
+		ns.ScreenshotPort = port
+	}
+	e.nodeStatusMu.Unlock()
+}
+
+// nodeScreenshotPort returns the Host.app screenshot server port for a node, or 0.
+func (e *Env) nodeScreenshotPort(name string) int {
+	e.nodeStatusMu.Lock()
+	defer e.nodeStatusMu.Unlock()
+	if ns := e.nodeStatus[name]; ns != nil {
+		return ns.ScreenshotPort
+	}
+	return 0
+}
+
+// initVnet creates the vnet server. Called once via sync.Once.
+func (e *Env) initVnet() {
+	e.vnetOnce.Do(func() {
+		var err error
+		e.server, err = vnet.New(&e.cfg)
+		if err != nil {
+			e.t.Fatalf("vnet.New: %v", err)
+		}
+		e.t.Cleanup(func() { e.server.Close() })
+
+		e.server.SetDHCPCallback(func(mac vnet.MAC, nodeNum int, msgType layers.DHCPMsgType, ip netip.Addr) {
+			name := e.nodeNameByNum(nodeNum)
+			nicIdx := e.nicIndexForMAC(name, mac)
+			ipStr := ip.String()
+			switch msgType {
+			case layers.DHCPMsgTypeDiscover:
+				e.setNodeDHCP(name, nicIdx, "Discover sent")
+				e.eventBus.Publish(VMEvent{NodeName: name, Type: EventDHCPDiscover, Message: "DHCP Discover sent", NIC: nicIdx})
+			case layers.DHCPMsgTypeOffer:
+				e.setNodeDHCP(name, nicIdx, "Offered "+ipStr)
+				e.eventBus.Publish(VMEvent{NodeName: name, Type: EventDHCPOffer, Message: "DHCP Offer received", Detail: ipStr, NIC: nicIdx})
+			case layers.DHCPMsgTypeRequest:
+				e.setNodeDHCP(name, nicIdx, "Requesting "+ipStr)
+				e.eventBus.Publish(VMEvent{NodeName: name, Type: EventDHCPRequest, Message: "DHCP Request sent", Detail: ipStr, NIC: nicIdx})
+			case layers.DHCPMsgTypeAck:
+				e.setNodeDHCP(name, nicIdx, "Got "+ipStr)
+				e.eventBus.Publish(VMEvent{NodeName: name, Type: EventDHCPAck, Message: "DHCP Ack: got " + ipStr, Detail: ipStr, NIC: nicIdx})
+			}
+		})
+
+		if e.sameTailnetUser {
+			e.server.ControlServer().AllNodesSameUser = true
+		}
+		if e.allOnline {
+			e.server.ControlServer().AllOnline = true
+		}
+		if e.peerRelayGrants {
+			e.server.ControlServer().PeerRelayGrants = true
+		}
+		if e.selfSignedDERPCertPinning {
+			e.server.ControlServer().DERPMap = e.buildSelfSignedDERPMap()
+		}
+		if e.controlDNS != nil {
+			cs := e.server.ControlServer()
+			cs.MagicDNSDomain = e.controlDNSDomain
+			cs.DNSConfig = e.controlDNS.Clone()
+		}
+		if e.fakeACME {
+			cs := e.server.ControlServer()
+			cs.MagicDNSDomain = "tailnet.test"
+			if cs.DNSConfig == nil {
+				cs.DNSConfig = new(tailcfg.DNSConfig)
+			}
+			cs.DNSConfig.Proxied = true
+		}
+		for _, n := range e.nodes {
+			if n.runSSH {
+				e.server.ControlServer().SSHPolicy = &tailcfg.SSHPolicy{
+					Rules: []*tailcfg.SSHRule{{
+						Principals: []*tailcfg.SSHPrincipal{{Any: true}},
+						// Allow permissive login + root login by default
+						SSHUsers: map[string]string{"*": "=", "root": "root"},
+						Action:   &tailcfg.SSHAction{Accept: true},
+					}},
+				}
+				break
+			}
+		}
+	})
+}
+
+// buildSelfSignedDERPMap returns a DERP map identical in structure to the
+// stock test map (same regions, hostnames, virtual IPs) but with each node's
+// CertName set to "sha256-raw:<hex>" pinning the actual self-signed cert
+// served by vnet's fake DERP server, and InsecureForTests cleared so the
+// pin is actually exercised. Nodes are matched to certs by HostName.
+func (e *Env) buildSelfSignedDERPMap() *tailcfg.DERPMap {
+	hostToHash := make(map[string]string, 2)
+	for i := range 2 {
+		hostToHash[e.server.DERPHostname(i)] = e.server.DERPCertSHA256Hex(i)
+	}
+	src := e.server.ControlServer().DERPMap
+	dm := &tailcfg.DERPMap{
+		Regions: make(map[tailcfg.DERPRegionID]*tailcfg.DERPRegion, len(src.Regions)),
+	}
+	for id, srcRegion := range src.Regions {
+		r := *srcRegion
+		r.Nodes = make([]*tailcfg.DERPNode, len(srcRegion.Nodes))
+		for i, srcNode := range srcRegion.Nodes {
+			n := *srcNode
+			hash, ok := hostToHash[n.HostName]
+			if !ok {
+				e.t.Fatalf("buildSelfSignedDERPMap: no cert hash for HostName %q", n.HostName)
+			}
+			n.InsecureForTests = false
+			n.CertName = "sha256-raw:" + hash
+			r.Nodes[i] = &n
+		}
+		dm.Regions[id] = &r
+	}
+	return dm
+}
+
+// ensureQEMUSocket creates the Unix stream socket for QEMU VMs. Called once.
+func (e *Env) ensureQEMUSocket() {
+	e.qemuSockOnce.Do(func() {
+		e.initVnet()
+		e.sockAddr = filepath.Join(e.sockDir, "vnet.sock")
+		srv, err := net.Listen("unix", e.sockAddr)
+		if err != nil {
+			e.t.Fatalf("listen unix: %v", err)
+		}
+		e.t.Cleanup(func() { srv.Close() })
+		go func() {
+			for {
+				c, err := srv.Accept()
+				if err != nil {
+					return
+				}
+				go e.server.ServeUnixConn(c.(*net.UnixConn), vnet.ProtocolQEMU)
+			}
+		}()
+	})
+}
+
+// ensureDgramSocket creates the Unix dgram socket for macOS VMs. Called once.
+func (e *Env) ensureDgramSocket() {
+	e.dgramSockOnce.Do(func() {
+		e.initVnet()
+		e.dgramSockAddr = filepath.Join(e.sockDir, "dgram.sock")
+		dgramAddr, err := net.ResolveUnixAddr("unixgram", e.dgramSockAddr)
+		if err != nil {
+			e.t.Fatalf("resolve dgram addr: %v", err)
+		}
+		uc, err := net.ListenUnixgram("unixgram", dgramAddr)
+		if err != nil {
+			e.t.Fatalf("listen unixgram: %v", err)
+		}
+		e.t.Cleanup(func() { uc.Close() })
+		go e.server.ServeUnixConn(uc, vnet.ProtocolUnixDGRAM)
+	})
+}
+
+// ensureCompiled compiles binaries for the given platform and registers them
+// with the vnet file server. Safe for concurrent use; only compiles once per platform.
+func (e *Env) ensureCompiled(ctx context.Context, goos, goarch string) {
+	key := goos + "_" + goarch
+
+	e.compileMu.Lock()
+	once, ok := e.compileOnce[key]
+	if !ok {
+		once = new(sync.Once)
+		mak.Set(&e.compileOnce, key, once)
+	}
+	e.compileMu.Unlock()
+
+	once.Do(func() {
+		step := e.Step(fmt.Sprintf("Compile %s_%s binaries", goos, goarch))
+		step.Begin()
+		if err := e.compileBinariesForOS(ctx, goos, goarch); err != nil {
+			step.End(err)
+			e.t.Fatalf("compileBinariesForOS(%s, %s): %v", goos, goarch, err)
+		}
+		step.End(nil)
+		e.registerBinaries(goos, goarch)
+	})
+}
+
+// ensureImage prepares the cloud image for os and returns any error from the
+// preparation. Safe for concurrent use; only prepares once per OS name.
+func (e *Env) ensureImage(ctx context.Context, os OSImage) error {
+	return e.prepareImageOnce(os.Name, fmt.Sprintf("Prepare %s image", os.Name), func() error {
+		return ensureImage(ctx, os)
+	})
+}
+
+// prepareImageOnce runs prepare as the web UI step stepName the first time
+// it's called for the image named imgName. Every call for that image,
+// concurrent or later, returns the error from that one run, so no node
+// boots from an image whose preparation failed.
+func (e *Env) prepareImageOnce(imgName, stepName string, prepare func() error) error {
+	e.compileMu.Lock()
+	f, ok := e.imageOnce[imgName]
+	if !ok {
+		f = sync.OnceValue(func() error {
+			step := e.Step(stepName)
+			step.Begin()
+			err := prepare()
+			step.End(err)
+			return err
+		})
+		mak.Set(&e.imageOnce, imgName, f)
+	}
+	e.compileMu.Unlock()
+	return f()
+}
+
+// registerBinaries registers compiled binaries with the vnet file server.
+// Safe for concurrent use.
+func (e *Env) registerBinaries(goos, goarch string) {
+	e.initVnet()
+	dir := goos + "_" + goarch
+	for _, name := range []string{"tta", "tappervpn", "tappervpnd"} {
+		data, err := os.ReadFile(filepath.Join(e.binDir, dir, name))
+		if err != nil {
+			e.t.Fatalf("reading compiled %s/%s: %v", dir, name, err)
+		}
+		e.server.RegisterFile(dir+"/"+name, data)
+	}
+}
+
+// WaitForAgentConn waits for a TTA agent to connect by issuing a simple
+// HTTP GET to the root endpoint, without requiring tappervpnd.
+func (e *Env) WaitForAgentConn(ctx context.Context, n *Node) error {
+	for {
+		reqCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		req, err := http.NewRequestWithContext(reqCtx, "GET", "http://unused/", nil)
+		if err != nil {
+			cancel()
+			return err
+		}
+		res, err := n.agent.HTTPClient.Do(req)
+		cancel()
+		if err == nil {
+			res.Body.Close()
+			// Close any idle connections left over. New requests will create new
+			// connections lazily rather than reusing existing connections.
+			n.agent.CloseIdleConnections()
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// Agent returns the node's TTA agent client, or nil if NoAgent is set.
+func (n *Node) Agent() *vnet.NodeAgentClient {
+	return n.agent
+}
+
+// LANPing pings a LAN IP from the given node using TTA's /ping endpoint.
+// It retries for up to 2 minutes, which is enough for a macOS VM to boot
+// and acquire a DHCP lease.
+func (e *Env) LANPing(from *Node, targetIP netip.Addr) {
+	if from.agent == nil {
+		e.t.Fatalf("LANPing: node %s has no agent (NoAgent set?)", from.name)
+	}
+	e.t.Logf("LANPing: %s -> %s", from.name, targetIP)
+	deadline := time.Now().Add(2 * time.Minute)
+	for attempt := 0; time.Now().Before(deadline); attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		reqURL := fmt.Sprintf("http://unused/ping?host=%s", targetIP)
+		req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
+		if err != nil {
+			cancel()
+			e.t.Fatalf("LANPing: %v", err)
+		}
+		res, err := from.agent.HTTPClient.Do(req)
+		cancel()
+		if err != nil {
+			if attempt%10 == 0 {
+				e.t.Logf("LANPing attempt %d: %v", attempt+1, err)
+			}
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		body, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		if res.StatusCode == 200 {
+			e.t.Logf("LANPing: %s -> %s succeeded on attempt %d", from.name, targetIP, attempt+1)
+			return
+		}
+		if attempt%10 == 0 {
+			e.t.Logf("LANPing attempt %d: status %d, body: %s", attempt+1, res.StatusCode, string(body))
+		}
+		time.Sleep(2 * time.Second)
+	}
+	e.t.Fatalf("LANPing: %s -> %s timed out after 2 minutes", from.name, targetIP)
+}
+
+// SendTaildropFile sends a file via Taildrop from one node to another.
+// The to node must be on the tailnet. It fatals on error.
+func (e *Env) SendTaildropFile(from, to *Node, name string, content []byte) {
+	e.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	st, err := to.agent.Status(ctx)
+	if err != nil {
+		e.t.Fatalf("SendTaildropFile: status for %s: %v", to.name, err)
+	}
+	if len(st.Self.TapperVPNIPs) == 0 {
+		e.t.Fatalf("SendTaildropFile: %s has no TapperVPN IPs", to.name)
+	}
+	target := st.Self.TapperVPNIPs[0].String()
+
+	reqURL := fmt.Sprintf("http://unused/taildrop-send?to=%s&name=%s", target, name)
+	req, err := http.NewRequestWithContext(ctx, "POST", reqURL, bytes.NewReader(content))
+	if err != nil {
+		e.t.Fatalf("SendTaildropFile: %v", err)
+	}
+	res, err := from.agent.HTTPClient.Do(req)
+	if err != nil {
+		e.t.Fatalf("SendTaildropFile(%s -> %s): %v", from.name, to.name, err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	if res.StatusCode != 200 {
+		e.t.Fatalf("SendTaildropFile(%s -> %s): %s: %s", from.name, to.name, res.Status, body)
+	}
+	if msg := strings.TrimSpace(string(body)); msg != "" {
+		e.t.Logf("[%s] %s", from.name, msg)
+	}
+	e.t.Logf("[%s] sent Taildrop %q (%d bytes) to %s", from.name, name, len(content), to.name)
+}
+
+// RecvTaildropFile waits for an incoming Taildrop file on the node and
+// returns the filename and contents. The provided context bounds the wait;
+// in addition, RecvTaildropFile imposes its own 90s upper bound. It fatals
+// on error or timeout.
+func (e *Env) RecvTaildropFile(ctx context.Context, n *Node) (name string, content []byte) {
+	e.t.Helper()
+	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", "http://unused/taildrop-recv", nil)
+	if err != nil {
+		e.t.Fatalf("RecvTaildropFile: %v", err)
+	}
+	res, err := n.agent.HTTPClient.Do(req)
+	if err != nil {
+		e.t.Fatalf("RecvTaildropFile(%s): %v", n.name, err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	if res.StatusCode != 200 {
+		e.t.Fatalf("RecvTaildropFile(%s): %s: %s", n.name, res.Status, body)
+	}
+	name = res.Header.Get("Taildrop-Filename")
+	e.t.Logf("[%s] received Taildrop %q (%d bytes)", n.name, name, len(body))
+	return name, body
+}
+
+var (
+	// gokrazyBuildMu serializes gokrazy image builds, which share the
+	// gokrazy directory, and guards gokrazyBuilt.
+	gokrazyBuildMu sync.Mutex
+
+	// gokrazyBuilt is the set of gokrazy image names that this process
+	// has already built successfully.
+	gokrazyBuilt set.Set[string]
+)
+
+// GokrazyImages returns the gokrazy OS images that natlab builds from
+// source: [Gokrazy] and its minimal-feature variants. It is intended for
+// tooling such as a CI prep step that wants to prebuild them.
+func GokrazyImages() []OSImage {
+	return []OSImage{Gokrazy, GokrazyExtraSmall, GokrazyNoNATTraversal, GokrazyDERPOnly}
+}
+
+// BuildGokrazyImage builds the gokrazy image img from the current source
+// tree, writing its qcow2 file into the gokrazy directory, unless this
+// process has already built it. Build output goes to os.Stdout and
+// os.Stderr. It is safe for concurrent use.
+func BuildGokrazyImage(ctx context.Context, img OSImage) error {
+	gokrazyBuildMu.Lock()
+	defer gokrazyBuildMu.Unlock()
+	return buildGokrazyImageLocked(ctx, img)
+}
+
+func buildGokrazyImageLocked(ctx context.Context, img OSImage) error {
+	if !img.IsGokrazy {
+		return fmt.Errorf("%s is not a gokrazy image", img.Name)
+	}
+	if gokrazyBuilt.Contains(img.Name) {
+		return nil
+	}
+	modRoot, err := findModRoot()
+	if err != nil {
+		return err
+	}
+	args, _ := img.gokrazyMakeArgs()
+	if img.gokrazyKeep != nil {
+		log.Printf("building %s image (keeping only features %v)...", img.Name, img.gokrazyKeep)
+	} else {
+		log.Printf("building %s image...", img.Name)
+	}
+	cmd := exec.CommandContext(ctx, "make", args...)
+	cmd.Dir = filepath.Join(modRoot, "gokrazy")
+	cmd.Stderr = os.Stderr
+	cmd.Stdout = os.Stdout
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("make %s: %w", args[0], err)
+	}
+	gokrazyBuilt.Make()
+	gokrazyBuilt.Add(img.Name)
+	return nil
+}
+
+// ensureGokrazy builds the gokrazy image img (once per test process) and
+// locates the kernel. It returns the path to img's base qcow2 image.
+// The build is fast (~4s) so we always rebuild to ensure the baked-in
+// binaries (tta, tappervpn, tappervpnd) match the current source.
+// It is safe for concurrent use.
+func (e *Env) ensureGokrazy(ctx context.Context, img OSImage) (basePath string, err error) {
+	modRoot, err := findModRoot()
+	if err != nil {
+		return "", err
+	}
+	if err := e.prepareImageOnce(img.Name, fmt.Sprintf("Build %s image", img.Name), func() error {
+		return e.buildGokrazy(ctx, modRoot, img)
+	}); err != nil {
+		return "", err
+	}
+	_, qcow2 := img.gokrazyMakeArgs()
+	return filepath.Join(modRoot, "gokrazy", qcow2), nil
+}
+
+// buildGokrazy builds the gokrazy image img, unless this process already
+// has, and sets e.gokrazyKernel.
+func (e *Env) buildGokrazy(ctx context.Context, modRoot string, img OSImage) error {
+	gokrazyBuildMu.Lock()
+	defer gokrazyBuildMu.Unlock()
+
+	if err := buildGokrazyImageLocked(ctx, img); err != nil {
+		return err
+	}
+
+	if e.gokrazyKernel == "" {
+		kernel, err := findKernelPath(filepath.Join(modRoot, "go.mod"))
+		if err != nil {
+			return fmt.Errorf("finding kernel: %w", err)
+		}
+		e.gokrazyKernel = kernel
+	}
+	return nil
+}
+
+// compileBinariesForOS prepares the tta, tappervpn, and tappervpnd binaries
+// for the given GOOS/GOARCH and places them in e.binDir/<goos>_<goarch>/.
+//
+// tta is always built from the local source tree (the test agent must match
+// the test framework). When --test-version is set, tappervpn and tappervpnd
+// are taken from the downloaded release tarball instead of being compiled
+// from source.
+func (e *Env) compileBinariesForOS(ctx context.Context, goos, goarch string) error {
+	modRoot, err := findModRoot()
+	if err != nil {
+		return err
+	}
+
+	dir := goos + "_" + goarch
+	outDir := filepath.Join(e.binDir, dir)
+	if err := os.MkdirAll(outDir, 0755); err != nil {
+		return err
+	}
+
+	// Use downloaded release binaries only on Linux: pkgs.tailscale.com only
+	// publishes Linux tarballs, so other GOOS values still build from source.
+	useDownloaded := e.testVersion != "" && goos == "linux"
+
+	type binary struct{ name, pkg string }
+	buildBins := []binary{{"tta", "./cmd/tta"}}
+	if !useDownloaded {
+		buildBins = append(buildBins,
+			binary{"tappervpn", "./cmd/tappervpn"},
+			binary{"tappervpnd", "./cmd/tappervpnd"})
+	}
+
+	var eg errgroup.Group
+	for _, bin := range buildBins {
+		eg.Go(func() error {
+			outPath := filepath.Join(outDir, bin.name)
+			e.t.Logf("compiling %s/%s...", dir, bin.name)
+			cmd := exec.CommandContext(ctx, "go", "build", "-o", outPath, bin.pkg)
+			cmd.Dir = modRoot
+			cmd.Env = append(os.Environ(), "GOOS="+goos, "GOARCH="+goarch, "CGO_ENABLED=0")
+			if out, err := cmd.CombinedOutput(); err != nil {
+				return fmt.Errorf("building %s/%s: %v\n%s", dir, bin.name, err, out)
+			}
+			e.t.Logf("compiled %s/%s", dir, bin.name)
+			return nil
+		})
+	}
+
+	if useDownloaded {
+		eg.Go(func() error {
+			srcDir, err := ensureVersionBinaries(ctx, e.testVersion, goarch, e.t.Logf)
+			if err != nil {
+				return err
+			}
+			for _, name := range []string{"tappervpn", "tappervpnd"} {
+				if err := copyFile(filepath.Join(srcDir, name), filepath.Join(outDir, name), 0755); err != nil {
+					return fmt.Errorf("staging %s/%s: %w", dir, name, err)
+				}
+			}
+			e.t.Logf("staged version %s tappervpn & tappervpnd for %s", e.testVersion, dir)
+			return nil
+		})
+	}
+
+	return eg.Wait()
+}
+
+// copyFile copies src to dst with the given permission bits.
+func copyFile(src, dst string, perm os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	return writeAtomic(dst, in, perm)
+}
+
+// findModRoot returns the root of the Go module (where go.mod is).
+func findModRoot() (string, error) {
+	out, err := exec.Command("go", "env", "GOMOD").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("go env GOMOD: %w", err)
+	}
+	gomod := strings.TrimSpace(string(out))
+	if gomod == "" || gomod == os.DevNull {
+		return "", fmt.Errorf("not in a Go module")
+	}
+	return filepath.Dir(gomod), nil
+}
+
+// findKernelPath finds the gokrazy kernel vmlinuz path from go.mod.
+func findKernelPath(goMod string) (string, error) {
+	// Import the same logic as nat_test.go.
+	b, err := os.ReadFile(goMod)
+	if err != nil {
+		return "", err
+	}
+
+	goModCacheB, err := exec.Command("go", "env", "GOMODCACHE").CombinedOutput()
+	if err != nil {
+		return "", err
+	}
+	goModCache := strings.TrimSpace(string(goModCacheB))
+
+	// Parse go.mod to find kernel version.
+	for line := range strings.SplitSeq(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "github.com/gokrazy/kernel.amd64") {
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				return filepath.Join(goModCache, parts[0]+"@"+parts[1], "vmlinuz"), nil
+			}
+		}
+	}
+	return "", fmt.Errorf("kernel.amd64 not found in %s", goMod)
+}
+
+// PingRoute describes what connection type was used to transfer a Disco ping.
+type PingRoute string
+
+const (
+	PingRouteDirect PingRoute = "direct"
+	PingRouteDERP   PingRoute = "derp"
+	PingRouteLocal  PingRoute = "local"
+	PingRouteNil    PingRoute = "nil"
+)
+
+// classifyPing finds what kind of route has been used on a ping path.
+// It is only really relevant for DiscoPings.
+func classifyPing(pr *ipnstate.PingResult) PingRoute {
+	if pr == nil {
+		return PingRouteNil
+	}
+
+	if pr.Endpoint == "" {
+		return PingRouteDERP
+	}
+
+	ap, err := netip.ParseAddrPort(pr.Endpoint)
+	if err == nil && ap.Addr().IsPrivate() {
+		return PingRouteLocal
+	}
+	return PingRouteDirect
+}
+
+// PingExpect retries disco pings until the result matches wantRoute or the
+// timeout is reached. It is using DiscoPings as this is the only ping type
+// that can classify the connection type.
+func (e *Env) PingExpect(from, to *Node, wantRoute PingRoute, timeout time.Duration) (string, error) {
+	e.t.Helper()
+	ctx, cancel := context.WithTimeout(e.t.Context(), timeout)
+	defer cancel()
+	var lastRoute PingRoute
+	toSt, err := to.agent.Status(ctx)
+	if err != nil {
+		return "", fmt.Errorf("ping: can't get %s status: %w", to.name, err)
+	}
+	if len(toSt.Self.TapperVPNIPs) == 0 {
+		return "", fmt.Errorf("ping: %s has no TapperVPN IPs", to.name)
+	}
+	targetIP := toSt.Self.TapperVPNIPs[0]
+	for ctx.Err() == nil {
+		pingCtx, pingCancel := context.WithTimeout(ctx, 3*time.Second)
+		pr, err := from.agent.PingWithOpts(pingCtx, targetIP, tailcfg.PingDisco, local.PingOpts{})
+		pingCancel()
+		if err == nil && pr.Err == "" {
+			got := classifyPing(pr)
+			e.t.Logf("Saw ping type %q", got)
+			if got == wantRoute {
+				return pr.Endpoint, nil
+			} else {
+				lastRoute = got
+			}
+		}
+		select {
+		case <-time.After(500 * time.Millisecond):
+		case <-ctx.Done():
+		}
+	}
+	return "", fmt.Errorf("ping route = %q, want %q (after %v)", lastRoute, wantRoute, timeout)
+}
+
+// PingSettle retries disco pings every 1 second between nodes from -> to. The
+// intention is to have the route settle into the desired state at ctx timeout,
+// making the last returned type the settled state of the connection. If the
+// connection is direct before the timeout, the method returns early.
+// If no ping has been completed, nil will be returned.
+func (e *Env) PingSettle(from, to *Node, timeout time.Duration) (*ipnstate.PingResult, error) {
+	e.t.Helper()
+	ctx, cancel := context.WithTimeout(e.t.Context(), timeout)
+	defer cancel()
+	toSt, err := to.agent.Status(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("ping: can't get %s status: %w", to.name, err)
+	}
+	if len(toSt.Self.TapperVPNIPs) == 0 {
+		return nil, fmt.Errorf("ping: %s has no TapperVPN IPs", to.name)
+	}
+	targetIP := toSt.Self.TapperVPNIPs[0]
+	var lastRes *ipnstate.PingResult
+	n := 0
+	for ctx.Err() == nil {
+		n++
+		e.t.Logf("ping: attempt %d to %v ...", n, targetIP)
+		pingCtx, pingCancel := context.WithTimeout(ctx, 3*time.Second)
+		pr, err := from.agent.PingWithOpts(pingCtx, targetIP, tailcfg.PingDisco, local.PingOpts{})
+		pingCancel()
+		if err != nil {
+			e.t.Logf("ping: attempt %d error: %v", n, err)
+			if ctx.Err() != nil {
+				break
+			}
+			continue
+		}
+		if pr.Err != "" {
+			return nil, errors.New(pr.Err)
+		}
+		e.t.Logf("ping: attempt %d: derp=%d endpoint=%v latency=%v", n, pr.DERPRegionID, pr.Endpoint, pr.LatencySeconds)
+		// When DERP on the result is 0, we have settled onto a direct path.
+		if pr.DERPRegionID == 0 {
+			return pr, nil
+		}
+		lastRes = pr
+		select {
+		case <-ctx.Done():
+			return lastRes, nil
+		case <-time.After(time.Second):
+		}
+	}
+	if lastRes != nil {
+		return lastRes, nil
+	}
+	return nil, fmt.Errorf("ping: ping no response (ctx: %v)", ctx.Err())
+}
+
+// NumNodes returns the current number of nodes configured in the env.
+func (e *Env) NumNodes() int {
+	return len(e.nodes)
+}
+
+// DropControlTraffic sets up a blackhole for control traffic for just this
+// node on all the networks belonging to the node.
+func (e *Env) DropControlTraffic(n *Node) {
+	for _, network := range n.nets {
+		network.BlackholeControlForAddr(n.LanIP(network))
+	}
+}
+
+// SetLinkUp sets the link status of a network for a node. Setting the link down
+// is equivalent to unplugging the network cable from the node, the interface
+// is still present on the node, the "media" is just lost.
+func (e *Env) SetLinkUp(n *Node, nw *vnet.Network, up bool) {
+	if n.os.IsGokrazy {
+		e.t.Fatal("SetLinkUp is not supported on gokrazy nodes")
+	}
+	ifIndex := slices.Index(n.vnetNode.Networks(), nw)
+	if ifIndex == -1 {
+		e.t.Fatal("network not found for node")
+	}
+	if err := e.setLink(n, ifIndex, up); err != nil {
+		e.t.Fatalf("unable to set link status: %s", err.Error())
+	}
+}

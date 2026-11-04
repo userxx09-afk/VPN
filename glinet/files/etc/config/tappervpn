@@ -30,3 +30,5 @@ config tappervpn 'main'
 	option advertise_exit_node '0'
 	# UDP port for peer-to-peer traffic.
 	option port '41642'
+	# Check GitHub once a day and install signed TapperVPN updates.
+	option auto_update '1'

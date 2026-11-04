@@ -1,0 +1,12 @@
+[Unit]
+Description=Wait for TapperVPN to be online
+After=tappervpnd.service
+Requires=tappervpnd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/tappervpn wait
+RemainAfterExit=yes
+
+[Install]
+WantedBy=tappervpn-online.target

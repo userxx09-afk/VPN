@@ -1,35 +1,94 @@
-# meshwall
+# TapperVPN
 
-An application-aware firewall that builds a WireGuard mesh between devices.
-Any capable node can be the **gateway** (exit node), and you choose **which
-applications** send their traffic through it.
+A mesh VPN where any capable device can be the **gateway** (exit node), and you
+choose **which apps** (Windows, Android) or **which devices and sites** (routers)
+send their traffic through it. It runs on your own control server and updates
+itself from this repository's GitHub Releases.
 
-Built on forks of:
+Everything needed to build and release TapperVPN is in this repo:
 
-| Folder        | Upstream                              | Role                                   |
-|---------------|---------------------------------------|----------------------------------------|
-| `tailscale/`  | github.com/tailscale/tailscale (BSD-3) | Node daemon + CLI (`tailscaled`, `tailscale`) |
-| `headscale/`  | github.com/juanfont/headscale (BSD-3)  | Self-hosted control server             |
+| Folder | What it is | Built from |
+|---|---|---|
+| `tappervpn/` | Client: daemon `tappervpnd`, CLI `tappervpn`, our updater (`updater/`, `cmd/tappervpn-updater`, `cmd/tappervpn-release`) | Tailscale (BSD-3) |
+| `headscale/` | Control server | Headscale (BSD-3) |
+| `tappervpn-android/` | Android and Fire TV app (`com.tappervpn.ipn`) | tailscale-android (BSD-3) |
+| `glinet/` | Package for GL.iNet / OpenWrt routers | ours |
+| `server/` | Server config, policy, `install.sh` for the Ubuntu server | ours |
+| `scripts/` | Build, install, release and rebrand scripts | ours |
+| `docs/` | Design notes, [upstream updates](docs/upstream.md) | ours |
 
-Both were shallow-cloned on 2026-10-18 (tailscale `e3c3ef1`, headscale `691ef56`).
+The client and app are renamed forks of Tailscale: the Go module is
+`tappervpn.com`, binaries and services are TapperVPN, and the Android package
+is `com.tappervpn.ipn`. "Tailscale" still appears in the copyright notices
+(the license requires them) and in the addresses of Tailscale's public relay
+(DERP) servers, which TapperVPN uses. See [docs/upstream.md](docs/upstream.md).
 
-## Prerequisites (Windows dev box)
+## What is not in the repo
 
-- **Go 1.27.2+** (both `go.mod` files require it): https://go.dev/dl/
-- Git (installed)
-- Headscale officially ships only Linux/macOS server builds, but it builds and runs natively
-  on Windows, which is fine for development. Use Linux (WSL, a VPS, a Pi) for production.
+| What | Where | Why |
+|---|---|---|
+| Server database and keys (`server/data/`, `/var/lib/headscale/` on the server) | Your private backup | Whoever has them controls the network |
+| Release signing key | `%USERPROFILE%\.tappervpn\release.key` | Whoever has it can push updates to every device |
+| Android signing key | `%USERPROFILE%\.android\debug.keystore` | Android only accepts updates signed with the same key |
+| Toolchains: Go, JDK 17, Android SDK/NDK | Download (see below) | Several GB |
+
+**Back up the two signing keys.** If the release key is lost, devices refuse
+new updates and must be reinstalled by hand. If the Android key is lost,
+the app must be uninstalled and reinstalled.
+
+## Prerequisites (Windows build PC)
+
+- Go 1.27.2+ (https://go.dev/dl/), Git, Python 3.
+- Android: JDK 17 (`winget install Microsoft.OpenJDK.17`), Android SDK with NDK
+  23.1.7779620 in `toolchain\android-sdk`, and a Go with
+  `patches\go-android-time32.patch` applied in `toolchain\go-android`
+  (Fire TV needs it; see the top of `scripts\build-android.ps1`).
+- `bin\wintun.dll` (WireGuard's tunnel driver for Windows) is downloaded and
+  checked by `scripts\release.ps1`.
 
 ## Building
 
 ```bash
-cd tailscale && go build -o ../bin/tailscaled.exe ./cmd/tailscaled && go build -o ../bin/tailscale.exe ./cmd/tailscale
-cd ../headscale && go build -o ../bin/headscale.exe ./cmd/headscale
+cd tappervpn && go build -o ../bin/ ./cmd/tappervpnd ./cmd/tappervpn ./cmd/tappervpn-updater
+cd ../headscale && go build -o ../bin/ ./cmd/headscale
 ```
 
-`tailscaled.exe` also needs **`bin/wintun.dll`** (the tunnel adapter driver, 0.14.1, amd64) from
-https://www.wintun.net/builds/wintun-0.14.1.zip (zip SHA-256 `07c25618…24ef51`, DLL signed by
-WireGuard LLC). Without it, the daemon only runs with `--tun=userspace-networking`.
+- Android: `scripts\build-android.ps1` (output `bin\tappervpn-debug.apk`).
+- Routers: `python glinet/build.py` (see [glinet/README.md](glinet/README.md)).
+- Everything, signed, for a release: `scripts\release.ps1`.
+
+## Releases and auto-update
+
+The version lives in `VERSION`. To release: bump it, commit, then run
+`scripts\release.ps1 -Publish` (with `$env:GITHUB_TOKEN` set). It builds every
+platform, writes `SHA256SUMS`, signs it with the release key, and publishes a
+GitHub release with these files:
+
+| File | Installed by |
+|---|---|
+| `tappervpn-windows-amd64.zip` | Windows: `tappervpn-updater.exe`, daily scheduled task |
+| `tappervpn-server-linux-amd64.tar.gz` | Server: `tappervpn-updater`, daily systemd timer |
+| `tappervpn-glinet-<cpu>.ipk` | Routers: `/usr/libexec/tappervpn/update`, daily cron |
+| `tappervpn-android.apk` | Android: daily background check, then asks you to tap Install |
+| `SHA256SUMS`, `SHA256SUMS.sig` | Checked by all of the above |
+
+Each device checks the signature against the public key built into it
+(`tappervpn/updater/release.pub`) and the file's hash before installing, so a
+tampered download or a release not signed by you is refused. The server
+updater backs up the database first and rolls back if Headscale doesn't come
+back up. Updates are only offered when the release version is newer than the
+installed one.
+
+## Installing
+
+- **Windows**: `scripts\install-windows.ps1` (Administrator) installs to
+  `C:\Program Files\TapperVPN`, adds the `TapperVPN` service and the
+  `TapperVPN Update` task. Then sign in once with `tappervpn up --login-server=... --auth-key=...`.
+- **Server**: copy and unpack the server tarball on the server, then
+  `sudo sh install.sh .`.
+- **Routers**: see [glinet/README.md](glinet/README.md).
+- **Android / Fire TV**: install `tappervpn-android.apk`. The first update asks
+  you to allow TapperVPN to install apps.
 
 ## Running the dev mesh (Windows)
 
@@ -41,61 +100,49 @@ WireGuard LLC). Without it, the daemon only runs with `--tun=userspace-networkin
 
 - Server config: `server/config.yaml` (listens on `0.0.0.0:8080`, advertises `http://192.168.5.207:8080`).
   Data paths in it must be **relative** (to the config's folder): Headscale treats `C:/...` as relative.
-- Join key: `server/data/preauthkey.json` (reusable, expires 2026-10-21). Make a new one with
+- Join key: `server/data/preauthkey.json`. Make a new one with
   `bin\headscale.exe -c server\config.yaml preauthkeys create --user 1 --reusable --expiration 72h`.
 - After a node advertises itself as a gateway, approve it on the server:
   `bin\headscale.exe -c server\config.yaml nodes list-routes`, then `nodes approve-routes`.
-- Use a gateway from another node: `bin\tailscale.exe set --exit-node=<gateway-name>`.
-- Don't commit `server/data/` or `node/state/`; they hold private keys.
+- Use a gateway from another node: `bin\tappervpn.exe set --exit-node=<gateway-name>`.
 
-Note: the official Tailscale Windows tray GUI is not open source. We use the open-source
-`tailscaled` daemon and `tailscale` CLI, and will build our own UI.
+## Where our changes are
 
-## Where our changes go
-
-| Feature | Key upstream code |
+| Feature | Code |
 |---|---|
-| Gateway (exit node) selection | `tailscale/ipn/ipnlocal/local.go`, `node_backend.go` (`ExitNodeID` prefs) |
-| Windows routing | `tailscale/wgengine/router/osrouter/router_windows.go` |
-| Windows firewall (WFP) | `tailscale/wf/firewall.go`, used from `cmd/tailscaled/tailscaled_windows.go` |
-| Userspace packet path | `tailscale/wgengine/netstack`, `tailscale/net/tstun` |
-| Domain-based routing (existing) | `tailscale/appc/` (App Connectors) |
-| Per-app policy distribution | `headscale/hscontrol/` (policy + node map) |
+| Per-app routing (Windows) | `tappervpn/feature/approuting/`, design in [docs/per-app-routing.md](docs/per-app-routing.md) |
+| Per-app exit nodes (Android) | `tappervpn-android/android/src/main/java/com/tappervpn/ipn/AppExitNodes.kt` |
+| Per-app policy in the control server | `headscale/hscontrol/policy/v2/` (nodeAttrs `app`) |
+| Auto-update | `tappervpn/updater/`, `tappervpn/cmd/tappervpn-updater/`, `tappervpn-android/.../AppUpdater.kt`, `glinet/files/usr/libexec/tappervpn/update` |
+| Routers | `glinet/` |
+| Removed from upstream | Tailscale's own package updater (`tappervpn/clientupdate`, disabled), Headscale's tailsql debug UI, the derper's setec secrets client |
 
 ## Roadmap
 
-1. **Baseline mesh**: Headscale in WSL; 2+ Windows nodes joined; one advertised as gateway.
-2. **Per-app policy model**: add an app list (e.g. `chrome.exe`, `C:\Program Files\...\app.exe`)
-   per node in Headscale policy, and push it to clients in the netmap.
-3. **Windows per-app routing**: design in [docs/per-app-routing.md](docs/per-app-routing.md)
-   (v1 is user-mode only: socket owner lookup + netstack; WFP driver comes later).
-   Earlier notes on WFP:
-   - Step A (user-mode WFP, like `wf/`): allow/block per app on the tunnel interface.
-   - Step B: send only the chosen apps to the gateway. This needs either a signed WFP callout
-     driver for redirection, or binding each app's sockets to the tunnel through a local proxy.
-4. **Own UI**: Windows tray app for choosing the gateway and app list.
-5. **Android**: `VpnService.addAllowedApplication()` per-app (fork of tailscale-android).
-6. **macOS**: `NETransparentProxyProvider` system extension.
-7. **iOS**: full-tunnel or domain-based only. Per-app VPN needs MDM; iOS cannot be a gateway.
+1. **Own UI**: Windows tray app for choosing the gateway and app list.
+2. **macOS**: `NETransparentProxyProvider` system extension.
+3. **iOS**: full-tunnel or domain-based only. Per-app VPN needs MDM; iOS cannot be a gateway.
+4. **Logo**: replace the Tailscale icons still used by the Android app and the web client.
 
 ## Known quirks
 
-- `headscale/`: one test fixture whose name contains `>` can't be checked out on Windows
-  (`hscontrol/testdata/apiv1_golden/...->_400_parity.json`). It shows up as a staged
-  deletion in `git status`. Harmless for building; don't commit that deletion.
-- Before releasing, rename and rebrand: the "Tailscale" name and logo are trademarks.
+- `headscale/hscontrol/testdata/apiv1_golden/` has one fixture whose name
+  contains `>`, which Windows can't create. It is in the repo but missing from a
+  Windows checkout, so that one test only passes on Linux.
+- On Windows, many headscale tests report "TempDir RemoveAll cleanup ... being
+  used by another process": SQLite still holds the test database open. The
+  tests themselves pass; run them on Linux for a clean result.
 
 ## Production server (Ubuntu)
 
-Since 2026-11-01 the control server runs on the Ubuntu 24.04 VM `frank` (192.168.5.207, ssh alias `tapper`),
-not on the Windows dev box.
+The control server runs on the Ubuntu 24.04 VM `frank` (192.168.5.207, ssh alias `tapper`).
 
 | What | Where on the server |
 |---|---|
-| Binaries (built here with `GOOS=linux GOARCH=amd64 CGO_ENABLED=0`) | `/usr/local/bin/headscale`, `tailscale`, `tailscaled` |
+| Binaries | `/usr/local/bin/headscale`, `tappervpn`, `tappervpnd`, `tappervpn-updater` |
 | Config / policy | `/etc/headscale/config.yaml`, `/etc/headscale/policy.hujson` |
-| Database + noise key | `/var/lib/headscale/` |
-| Service | `systemctl status headscale` (runs as user `headscale`, starts on boot) |
+| Database + noise key | `/var/lib/headscale/` (updater backups: `db.sqlite.pre-update-*`) |
+| Services | `systemctl status headscale`, `systemctl list-timers tappervpn-update.timer` |
 | Admin CLI | `headscale -c /etc/headscale/config.yaml nodes list`, run as the `headscale` user |
 
 Clients use `http://192.168.5.207:8080` (LAN only until HTTPS and port forwarding are set up).

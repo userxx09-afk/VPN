@@ -1,0 +1,29 @@
+# Copyright (c) Tailscale Inc & contributors
+# SPDX-License-Identifier: BSD-3-Clause
+
+apiVersion: v2
+name: tappervpn-operator
+description: A Helm chart for TapperVPN Kubernetes operator
+home: https://github.com/tailscale/tailscale
+
+keywords:
+  - "tappervpn"
+  - "vpn"
+  - "ingress"
+  - "egress"
+  - "wireguard"
+
+sources:
+- https://github.com/tailscale/tailscale
+
+type: application
+
+maintainers:
+  - name: tappervpn-maintainers
+    url: https://tailscale.com/
+
+# version will be set to TapperVPN repo tag (without 'v') at release time.
+version: 0.1.0
+
+# appVersion will be set to TapperVPN repo tag at release time.
+appVersion: "stable"

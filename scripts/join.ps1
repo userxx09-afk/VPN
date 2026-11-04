@@ -9,5 +9,5 @@ $key = (Get-Content "$root\server\data\preauthkey.json" -Raw | ConvertFrom-Json)
 
 $upArgs = @("up", "--login-server=$LoginServer", "--auth-key=$key", "--unattended")
 if ($Gateway) { $upArgs += "--advertise-exit-node" }
-& "$root\bin\tailscale.exe" @upArgs
-& "$root\bin\tailscale.exe" status
+& "$root\bin\tappervpn.exe" @upArgs
+& "$root\bin\tappervpn.exe" status

@@ -1,0 +1,11 @@
+[Unit]
+Description=TapperVPN NGINX Authentication service
+After=nginx.service
+Wants=nginx.service
+
+[Service]
+ExecStart=/usr/sbin/tappervpn.nginx-auth
+DynamicUser=yes
+
+[Install]
+WantedBy=default.target

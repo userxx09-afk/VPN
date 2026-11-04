@@ -1,0 +1,1726 @@
+package tsic
+
+import (
+	"archive/tar"
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"net/netip"
+	"net/url"
+	"os"
+	"reflect"
+	"runtime/debug"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/cenkalti/backoff/v5"
+	"github.com/juanfont/headscale/hscontrol/types"
+	"github.com/juanfont/headscale/hscontrol/util"
+	"github.com/juanfont/headscale/integration/dockertestutil"
+	"github.com/juanfont/headscale/integration/integrationutil"
+	"github.com/ory/dockertest/v3"
+	"github.com/ory/dockertest/v3/docker"
+	"tappervpn.com/ipn"
+	"tappervpn.com/ipn/ipnstate"
+	"tappervpn.com/ipn/store/mem"
+	"tappervpn.com/net/netcheck"
+	"tappervpn.com/paths"
+	"tappervpn.com/types/key"
+	"tappervpn.com/types/netmap"
+	"tappervpn.com/util/multierr"
+	"tappervpn.com/util/rands"
+	"tappervpn.com/wgengine/filter"
+)
+
+const (
+	tsicHashLength       = 6
+	defaultPingCount     = 5
+	dockerContextPath    = "../."
+	caCertRoot           = "/usr/local/share/ca-certificates"
+	dockerExecuteTimeout = 60 * time.Second
+	// Some OIDC tests deliberately delay authentication for two minutes.
+	loginTimeout = 5 * time.Minute
+	tappervpnBin = "tappervpn"
+)
+
+// defaultPingTimeoutVal returns the per-attempt timeout for tappervpn ping.
+// On CI, the docker exec overhead is higher so the timeout is doubled,
+// which also doubles the docker exec timeout (timeout * count).
+func defaultPingTimeoutVal() time.Duration {
+	if util.IsCI() {
+		return 400 * time.Millisecond
+	}
+
+	return 200 * time.Millisecond
+}
+
+var (
+	errTapperVPNPingFailed         = errors.New("ping failed")
+	errTapperVPNPingNotDERP        = errors.New("ping not via DERP")
+	errTapperVPNNotLoggedIn        = errors.New("tappervpn not logged in")
+	errTapperVPNWrongPeerCount     = errors.New("wrong peer count")
+	errInvalidClientConfig         = errors.New("verifiably invalid client config requested")
+	errInvalidTapperVPNImageFormat = errors.New("invalid HEADSCALE_INTEGRATION_TAPPERVPN_IMAGE format, expected repository:tag")
+	errTapperVPNImageRequiredInCI  = errors.New("HEADSCALE_INTEGRATION_TAPPERVPN_IMAGE must be set in CI for HEAD version")
+	errContainerNotInitialized     = errors.New("container not initialized")
+	errFQDNNotYetAvailable         = errors.New("FQDN not yet available")
+	errCurlEmptyResponseBody       = errors.New("curl returned empty response body")
+)
+
+const (
+	VersionHead = "head"
+)
+
+func errTapperVPNStatus(hostname string, err error) error {
+	return fmt.Errorf("%s failed to fetch tappervpn status: %w", hostname, err)
+}
+
+// TapperVPNInContainer is an implementation of TapperVPNClient which
+// sets up a TapperVPN instance inside a container.
+type TapperVPNInContainer struct {
+	version  string
+	hostname string
+
+	pool      *dockertest.Pool
+	container *dockertest.Resource
+	network   *dockertest.Network
+
+	// "cache"
+	ips  []netip.Addr
+	fqdn string
+
+	// Only the current attempt is checked: earlier logins may be deliberately
+	// abandoned or rejected before the test starts another one.
+	login *loginAttempt
+
+	// optional config
+	caCerts           [][]byte
+	headscaleHostname string
+	withWebsocketDERP bool
+	withDERPOverHTTP  bool
+	withSSH           bool
+	withTags          []string
+	withEntrypoint    []string
+	withExtraHosts    []string
+	workdir           string
+	netfilter         string
+	extraLoginArgs    []string
+	withAcceptRoutes  bool
+	withPackages      []string // Alpine packages to install at container start
+	withWebserverPort int      // Port for built-in HTTP server (0 = disabled)
+	withExtraCommands []string // Extra shell commands to run before tappervpnd
+
+	// build options, solely for HEAD
+	buildConfig TapperVPNInContainerBuildConfig
+}
+
+type TapperVPNInContainerBuildConfig struct {
+	tags []string
+}
+
+// Option represent optional settings that can be given to a
+// TapperVPN instance.
+type Option = func(c *TapperVPNInContainer)
+
+// WithCACert adds it to the trusted surtificate of the TapperVPN container.
+func WithCACert(cert []byte) Option {
+	return func(tsic *TapperVPNInContainer) {
+		tsic.caCerts = append(tsic.caCerts, cert)
+	}
+}
+
+// WithNetwork sets the Docker [dockertest.Network] to use with
+// the TapperVPN instance.
+func WithNetwork(network *dockertest.Network) Option {
+	return func(tsic *TapperVPNInContainer) {
+		tsic.network = network
+	}
+}
+
+// WithHeadscaleName set the name of the headscale instance,
+// mostly useful in combination with TLS and WithCACert.
+func WithHeadscaleName(hsName string) Option {
+	return func(tsic *TapperVPNInContainer) {
+		tsic.headscaleHostname = hsName
+	}
+}
+
+// WithTags associates the given tags to the TapperVPN instance.
+func WithTags(tags []string) Option {
+	return func(tsic *TapperVPNInContainer) {
+		tsic.withTags = tags
+	}
+}
+
+// WithWebsocketDERP toggles a development knob to
+// force enable DERP connection through the new websocket protocol.
+func WithWebsocketDERP(enabled bool) Option {
+	return func(tsic *TapperVPNInContainer) {
+		tsic.withWebsocketDERP = enabled
+	}
+}
+
+// WithDERPOverHTTP makes the client reach the DERP server over plain-HTTP
+// websockets (TS_DEBUG_DERP_WS_CLIENT + TS_DEBUG_USE_DERP_HTTP). It is the
+// counterpart to [hsic.WithoutTLS]: a Headscale serving its embedded DERP without
+// TLS is otherwise unreachable, because the client defaults to dialing DERP over
+// HTTPS.
+func WithDERPOverHTTP() Option {
+	return func(tsic *TapperVPNInContainer) {
+		tsic.withWebsocketDERP = true
+		tsic.withDERPOverHTTP = true
+	}
+}
+
+// WithSSH enables SSH for the TapperVPN instance.
+func WithSSH() Option {
+	return func(tsic *TapperVPNInContainer) {
+		tsic.withSSH = true
+	}
+}
+
+// WithDockerWorkdir allows the docker working directory to be set.
+func WithDockerWorkdir(dir string) Option {
+	return func(tsic *TapperVPNInContainer) {
+		tsic.workdir = dir
+	}
+}
+
+func WithExtraHosts(hosts []string) Option {
+	return func(tsic *TapperVPNInContainer) {
+		tsic.withExtraHosts = hosts
+	}
+}
+
+// WithDockerEntrypoint allows the docker entrypoint of the container
+// to be overridden. This is a dangerous option which can make
+// the container not work as intended as a typo might prevent
+// tappervpnd and other processes from starting.
+// Use with caution.
+func WithDockerEntrypoint(args []string) Option {
+	return func(tsic *TapperVPNInContainer) {
+		tsic.withEntrypoint = args
+	}
+}
+
+// WithNetfilter configures TapperVPNs parameter --netfilter-mode
+// allowing us to turn of modifying ip[6]tables/nftables.
+// It takes: "on", "off", "nodivert".
+func WithNetfilter(state string) Option {
+	return func(tsic *TapperVPNInContainer) {
+		tsic.netfilter = state
+	}
+}
+
+// WithBuildTag adds an additional value to the `-tags=` parameter
+// of the Go compiler, allowing callers to customize the TapperVPN client build.
+// This option is only meaningful when invoked on **HEAD** versions of the client.
+// Attempts to use it with any other version is a bug in the calling code.
+func WithBuildTag(tag string) Option {
+	return func(tsic *TapperVPNInContainer) {
+		if tsic.version != VersionHead {
+			panic(errInvalidClientConfig)
+		}
+
+		tsic.buildConfig.tags = append(
+			tsic.buildConfig.tags, tag,
+		)
+	}
+}
+
+// WithExtraLoginArgs adds additional arguments to the `tappervpn up` command
+// as part of the [TapperVPNInContainer.Login] function.
+func WithExtraLoginArgs(args []string) Option {
+	return func(tsic *TapperVPNInContainer) {
+		tsic.extraLoginArgs = append(tsic.extraLoginArgs, args...)
+	}
+}
+
+// WithAcceptRoutes tells the node to accept incoming routes.
+func WithAcceptRoutes() Option {
+	return func(tsic *TapperVPNInContainer) {
+		tsic.withAcceptRoutes = true
+	}
+}
+
+// WithPackages specifies Alpine packages to install when the container starts.
+// This requires internet access and uses `apk add`. Common packages:
+// - "python3" for HTTP server
+// - "curl" for HTTP client
+// - "bind-tools" for dig command
+// - "iptables", "ip6tables" for firewall rules
+// Note: Tests using this option require internet access and cannot use
+// the built-in DERP server in offline mode.
+func WithPackages(packages ...string) Option {
+	return func(tsic *TapperVPNInContainer) {
+		tsic.withPackages = append(tsic.withPackages, packages...)
+	}
+}
+
+// WithWebserver starts a Python HTTP server on the specified port
+// alongside tappervpnd. This is useful for testing subnet routing
+// and ACL connectivity. Automatically adds "python3" to packages if needed.
+// The server serves files from the root directory (/).
+func WithWebserver(port int) Option {
+	return func(tsic *TapperVPNInContainer) {
+		tsic.withWebserverPort = port
+	}
+}
+
+// WithExtraCommands adds extra shell commands to run before tappervpnd starts.
+// Commands are run after package installation and CA certificate updates.
+func WithExtraCommands(commands ...string) Option {
+	return func(tsic *TapperVPNInContainer) {
+		tsic.withExtraCommands = append(tsic.withExtraCommands, commands...)
+	}
+}
+
+// buildEntrypoint constructs the container entrypoint command based on
+// configured options (packages, webserver, etc.).
+func (t *TapperVPNInContainer) buildEntrypoint() []string {
+	var commands []string
+
+	// Wait for network to be ready
+	commands = append(commands, "while ! ip route show default >/dev/null 2>&1; do sleep 0.1; done")
+
+	// If CA certs are configured, wait for them to be written by the Go code
+	// (certs are written after container start via [TapperVPNInContainer.WriteFile])
+	if len(t.caCerts) > 0 {
+		commands = append(commands,
+			fmt.Sprintf("while [ ! -f %s/user-0.crt ]; do sleep 0.1; done", caCertRoot))
+	}
+
+	// Install packages if requested (requires internet access)
+	packages := t.withPackages
+	if t.withWebserverPort > 0 && !slices.Contains(packages, "python3") {
+		packages = append(packages, "python3")
+	}
+
+	if len(packages) > 0 {
+		commands = append(commands, "apk add --no-cache "+strings.Join(packages, " "))
+	}
+
+	// Update CA certificates
+	commands = append(commands, "update-ca-certificates")
+
+	// Run extra commands if any
+	commands = append(commands, t.withExtraCommands...)
+
+	// Start webserver in background if requested
+	// Use subshell to avoid & interfering with command joining
+	if t.withWebserverPort > 0 {
+		commands = append(commands,
+			fmt.Sprintf("(python3 -m http.server --bind :: %d &)", t.withWebserverPort))
+	}
+
+	// Start tappervpnd (must be last as it's the foreground process)
+	commands = append(commands, "tappervpnd --tun=tsdev --verbose=10")
+
+	return []string{"/bin/sh", "-c", strings.Join(commands, " ; ")}
+}
+
+// New returns a new TapperVPNInContainer instance.
+//
+//nolint:gocyclo // complex container setup with many options
+func New(
+	pool *dockertest.Pool,
+	version string,
+	opts ...Option,
+) (*TapperVPNInContainer, error) {
+	hash := rands.HexString(tsicHashLength)
+
+	var err error
+
+	// Include run ID in hostname for easier identification of which test run owns this container
+	runID := dockertestutil.GetIntegrationRunID()
+
+	var hostname string
+
+	if runID != "" {
+		// Use last 6 chars of run ID (the random hash part) for brevity
+		runIDShort := runID[len(runID)-6:]
+		hostname = fmt.Sprintf("ts-%s-%s-%s", runIDShort, strings.ReplaceAll(version, ".", "-"), hash)
+	} else {
+		hostname = fmt.Sprintf("ts-%s-%s", strings.ReplaceAll(version, ".", "-"), hash)
+	}
+
+	tsic := &TapperVPNInContainer{
+		version:  version,
+		hostname: hostname,
+
+		pool: pool,
+	}
+
+	for _, opt := range opts {
+		opt(tsic)
+	}
+
+	// Build the entrypoint command dynamically based on options.
+	// Only build if no custom entrypoint was provided via WithDockerEntrypoint.
+	if len(tsic.withEntrypoint) == 0 {
+		tsic.withEntrypoint = tsic.buildEntrypoint()
+	}
+
+	if tsic.network == nil {
+		return nil, fmt.Errorf("no network set, called from: \n%s", string(debug.Stack())) //nolint:err113
+	}
+
+	tappervpnOptions := &dockertest.RunOptions{
+		Name:       hostname,
+		Networks:   []*dockertest.Network{tsic.network},
+		Entrypoint: tsic.withEntrypoint,
+		ExtraHosts: tsic.withExtraHosts,
+		Env:        []string{},
+	}
+
+	if tsic.withWebsocketDERP {
+		if version != VersionHead {
+			return tsic, errInvalidClientConfig
+		}
+
+		WithBuildTag("ts_debug_websockets")(tsic)
+
+		tappervpnOptions.Env = append(
+			tappervpnOptions.Env,
+			fmt.Sprintf("TS_DEBUG_DERP_WS_CLIENT=%t", tsic.withWebsocketDERP),
+		)
+
+		// Plain-HTTP DERP additionally needs the client to dial http:// instead of
+		// the default https://; see [WithDERPOverHTTP].
+		if tsic.withDERPOverHTTP {
+			tappervpnOptions.Env = append(tappervpnOptions.Env, "TS_DEBUG_USE_DERP_HTTP=true")
+		}
+	}
+
+	tappervpnOptions.ExtraHosts = append(tappervpnOptions.ExtraHosts,
+		"host.docker.internal:host-gateway")
+
+	if tsic.workdir != "" {
+		tappervpnOptions.WorkingDir = tsic.workdir
+	}
+
+	// dockertest isn't very good at handling containers that has already
+	// been created, this is an attempt to make sure this container isn't
+	// present.
+	err = pool.RemoveContainerByName(hostname)
+	if err != nil {
+		return nil, err
+	}
+
+	// Add integration test labels if running under hi tool
+	dockertestutil.DockerAddIntegrationLabels(tappervpnOptions, tappervpnBin)
+
+	var container *dockertest.Resource
+
+	if version != VersionHead {
+		// build options are not meaningful with pre-existing images,
+		// let's not lead anyone astray by pretending otherwise.
+		defaultBuildConfig := TapperVPNInContainerBuildConfig{}
+
+		hasBuildConfig := !reflect.DeepEqual(defaultBuildConfig, tsic.buildConfig)
+		if hasBuildConfig {
+			return tsic, errInvalidClientConfig
+		}
+	}
+
+	switch version {
+	case VersionHead:
+		// Check if a pre-built image is available via environment variable
+		prebuiltImage := os.Getenv("HEADSCALE_INTEGRATION_TAPPERVPN_IMAGE")
+
+		// If custom build tags are required (e.g., for websocket DERP), we cannot use
+		// the pre-built image as it won't have the necessary code compiled in.
+		hasBuildTags := len(tsic.buildConfig.tags) > 0
+		if hasBuildTags && prebuiltImage != "" {
+			log.Printf("Ignoring pre-built image %s because custom build tags are required: %v", //nolint:gosec // G706: integration-only log of trusted env value
+				prebuiltImage, tsic.buildConfig.tags)
+			prebuiltImage = ""
+		}
+
+		if prebuiltImage != "" {
+			log.Printf("Using pre-built tappervpn image: %s", prebuiltImage) //nolint:gosec // G706: integration-only log of trusted env value
+
+			// Parse image into repository and tag
+			repo, tag, ok := strings.Cut(prebuiltImage, ":")
+			if !ok {
+				return nil, errInvalidTapperVPNImageFormat
+			}
+
+			tappervpnOptions.Repository = repo
+			tappervpnOptions.Tag = tag
+
+			container, err = pool.RunWithOptions(
+				tappervpnOptions,
+				dockertestutil.DockerRestartPolicy,
+				dockertestutil.DockerAllowLocalIPv6,
+				dockertestutil.DockerAllowNetworkAdministration,
+				dockertestutil.DockerMemoryLimit,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("running pre-built tappervpn container %q: %w", prebuiltImage, err)
+			}
+		} else if util.IsCI() && !hasBuildTags {
+			// In CI, we require a pre-built image unless custom build tags are needed
+			return nil, errTapperVPNImageRequiredInCI
+		} else {
+			buildOptions := &dockertest.BuildOptions{
+				Dockerfile: "Dockerfile.tappervpn-HEAD",
+				ContextDir: dockerContextPath,
+				BuildArgs:  []docker.BuildArg{},
+			}
+
+			buildTags := strings.Join(tsic.buildConfig.tags, ",")
+			if len(buildTags) > 0 {
+				buildOptions.BuildArgs = append(
+					buildOptions.BuildArgs,
+					docker.BuildArg{
+						Name:  "BUILD_TAGS",
+						Value: buildTags,
+					},
+				)
+			}
+
+			container, err = pool.BuildAndRunWithBuildOptions(
+				buildOptions,
+				tappervpnOptions,
+				dockertestutil.DockerRestartPolicy,
+				dockertestutil.DockerAllowLocalIPv6,
+				dockertestutil.DockerAllowNetworkAdministration,
+				dockertestutil.DockerMemoryLimit,
+			)
+			if err != nil {
+				// Try to get more detailed build output
+				log.Printf("Docker build failed for %s, attempting to get detailed output...", hostname)
+
+				buildOutput, buildErr := dockertestutil.RunDockerBuildForDiagnostics(dockerContextPath, "Dockerfile.tappervpn-HEAD")
+
+				// Show the last 100 lines of build output to avoid overwhelming the logs
+				lines := strings.Split(buildOutput, "\n")
+
+				const maxLines = 100
+
+				startLine := 0
+				if len(lines) > maxLines {
+					startLine = len(lines) - maxLines
+				}
+
+				relevantOutput := strings.Join(lines[startLine:], "\n")
+
+				if buildErr != nil {
+					// The diagnostic build also failed - this is the real error
+					return nil, fmt.Errorf(
+						"%s could not start tappervpn container (version: %s): %w\n\nDocker build failed. Last %d lines of output:\n%s",
+						hostname,
+						version,
+						err,
+						maxLines,
+						relevantOutput,
+					)
+				}
+
+				if buildOutput != "" {
+					// Build succeeded on retry but container creation still failed
+					return nil, fmt.Errorf(
+						"%s could not start tappervpn container (version: %s): %w\n\nDocker build succeeded on retry, but container creation failed. Last %d lines of build output:\n%s",
+						hostname,
+						version,
+						err,
+						maxLines,
+						relevantOutput,
+					)
+				}
+
+				// No output at all - diagnostic build command may have failed
+				return nil, fmt.Errorf(
+					"%s could not start tappervpn container (version: %s): %w\n\nUnable to get diagnostic build output (command may have failed silently)",
+					hostname,
+					version,
+					err,
+				)
+			}
+		}
+	case "unstable":
+		// ghcr.io/tappervpn/tappervpn:unstable is stale (last updated
+		// 2022); only tappervpn/tappervpn on Docker Hub publishes
+		// current unstable builds.
+		tappervpnOptions.Repository = "tappervpn/tappervpn"
+		tappervpnOptions.Tag = version
+
+		err = dockertestutil.PullWithAuth(pool, tappervpnOptions.Repository+":"+tappervpnOptions.Tag)
+		if err != nil {
+			//nolint:gosec // G706: tag value is from MustTestVersions, not external input
+			log.Printf("Pull failed for %s:%s, error: %v", tappervpnOptions.Repository, tappervpnOptions.Tag, err)
+		}
+
+		container, err = pool.RunWithOptions(
+			tappervpnOptions,
+			dockertestutil.DockerRestartPolicy,
+			dockertestutil.DockerAllowLocalIPv6,
+			dockertestutil.DockerAllowNetworkAdministration,
+			dockertestutil.DockerMemoryLimit,
+		)
+		if err != nil {
+			log.Printf("Docker run failed for %s (unstable), error: %v", hostname, err)
+		}
+	default:
+		tappervpnOptions.Repository = "ghcr.io/tappervpn/tappervpn"
+		tappervpnOptions.Tag = "v" + version
+
+		err = dockertestutil.PullWithAuth(pool, tappervpnOptions.Repository+":"+tappervpnOptions.Tag)
+		if err != nil {
+			//nolint:gosec // G706: tag value is from MustTestVersions, not external input
+			log.Printf("Pull failed for %s:%s, error: %v", tappervpnOptions.Repository, tappervpnOptions.Tag, err)
+		}
+
+		container, err = pool.RunWithOptions(
+			tappervpnOptions,
+			dockertestutil.DockerRestartPolicy,
+			dockertestutil.DockerAllowLocalIPv6,
+			dockertestutil.DockerAllowNetworkAdministration,
+			dockertestutil.DockerMemoryLimit,
+		)
+		if err != nil {
+			log.Printf("Docker run failed for %s (version: v%s), error: %v", hostname, version, err)
+		}
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf(
+			"%s could not start tappervpn container (version: %s): %w",
+			hostname,
+			version,
+			err,
+		)
+	}
+
+	log.Printf("Created %s container\n", hostname)
+
+	tsic.container = container
+
+	for i, cert := range tsic.caCerts {
+		err = tsic.WriteFile(fmt.Sprintf("%s/user-%d.crt", caCertRoot, i), cert)
+		if err != nil {
+			return nil, fmt.Errorf("writing TLS certificate to container: %w", err)
+		}
+	}
+
+	return tsic, nil
+}
+
+// Shutdown stops and cleans up the TapperVPN container.
+func (t *TapperVPNInContainer) Shutdown() (string, string, error) {
+	stdoutPath, stderrPath, err := t.SaveLog("/tmp/control")
+	if err != nil {
+		log.Printf(
+			"saving log from %s: %s",
+			t.hostname,
+			fmt.Errorf("saving log: %w", err),
+		)
+	}
+
+	return stdoutPath, stderrPath, t.pool.Purge(t.container)
+}
+
+// Hostname returns the hostname of the TapperVPN instance.
+func (t *TapperVPNInContainer) Hostname() string {
+	return t.hostname
+}
+
+// Version returns the running TapperVPN version of the instance.
+func (t *TapperVPNInContainer) Version() string {
+	return t.version
+}
+
+// ContainerID returns the Docker container ID of the [TapperVPNInContainer]
+// instance.
+func (t *TapperVPNInContainer) ContainerID() string {
+	return t.container.Container.ID
+}
+
+// Execute runs a command inside the TapperVPN container and returns the
+// result of stdout as a string.
+func (t *TapperVPNInContainer) Execute(
+	command []string,
+	options ...dockertestutil.ExecuteCommandOption,
+) (string, string, error) {
+	stdout, stderr, err := dockertestutil.ExecuteCommand(
+		t.container,
+		command,
+		[]string{},
+		options...,
+	)
+	if err != nil {
+		// log.Printf("command issued: %s", strings.Join(command, " "))
+		// log.Printf("command stderr: %s\n", stderr)
+		if stdout != "" {
+			log.Printf("command stdout: %s\n", stdout)
+		}
+
+		if strings.Contains(stderr, "NeedsLogin") {
+			return stdout, stderr, errTapperVPNNotLoggedIn
+		}
+
+		return stdout, stderr, err
+	}
+
+	return stdout, stderr, nil
+}
+
+// Logs retrieves the container logs.
+func (t *TapperVPNInContainer) Logs(stdout, stderr io.Writer) error {
+	return dockertestutil.WriteLog(
+		t.pool,
+		t.container,
+		stdout, stderr,
+	)
+}
+
+func (t *TapperVPNInContainer) buildLoginCommand(
+	loginServer, authKey string,
+) []string {
+	command := []string{
+		tappervpnBin,
+		"up",
+		"--login-server=" + loginServer,
+		"--hostname=" + t.hostname,
+		fmt.Sprintf("--accept-routes=%t", t.withAcceptRoutes),
+	}
+
+	if authKey != "" {
+		command = append(command, "--authkey="+authKey)
+	}
+
+	if t.extraLoginArgs != nil {
+		command = append(command, t.extraLoginArgs...)
+	}
+
+	if t.withSSH {
+		command = append(command, "--ssh")
+	}
+
+	if t.netfilter != "" {
+		command = append(command, "--netfilter-mode="+t.netfilter)
+	}
+
+	if len(t.withTags) > 0 {
+		command = append(
+			command,
+			"--advertise-tags="+strings.Join(t.withTags, ","),
+		)
+	}
+
+	return command
+}
+
+// Login runs the login routine on the given TapperVPN instance.
+// This login mechanism uses the authorised key for authentication.
+func (t *TapperVPNInContainer) Login(
+	loginServer, authKey string,
+) error {
+	t.login = nil
+	command := t.buildLoginCommand(loginServer, authKey)
+
+	if _, _, err := t.Execute(command, dockertestutil.ExecuteCommandTimeout(dockerExecuteTimeout)); err != nil { //nolint:noinlineerr
+		return fmt.Errorf(
+			"%s failed to join tappervpn client (%s): %w",
+			t.hostname,
+			strings.Join(command, " "),
+			err,
+		)
+	}
+
+	return nil
+}
+
+// loginAttempt streams the first complete URL line while retaining all output.
+// done closes only after Docker exec returns; err can then be read repeatedly.
+type loginAttempt struct {
+	mu        sync.Mutex
+	output    bytes.Buffer
+	lineStart int
+	foundURL  bool
+	url       chan *url.URL
+	done      chan struct{}
+	err       error
+}
+
+func (l *loginAttempt) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	n, _ := l.output.Write(p)
+
+	for !l.foundURL {
+		line, _, complete := bytes.Cut(l.output.Bytes()[l.lineStart:], []byte{'\n'})
+		if !complete {
+			break
+		}
+
+		l.lineStart += len(line) + 1
+
+		u, err := util.ParseLoginURLFromCLILogin(string(line))
+		if err == nil {
+			l.foundURL = true
+			l.url <- u
+		}
+	}
+
+	return n, nil
+}
+
+func startLogin(
+	command []string,
+	exec func([]string, dockertest.ExecOptions) (int, error),
+) *loginAttempt {
+	l := &loginAttempt{url: make(chan *url.URL, 1), done: make(chan struct{})}
+
+	go func() {
+		defer close(l.done)
+
+		exitCode, err := exec(command, dockertest.ExecOptions{StdOut: l, StdErr: l})
+		log.Printf("%v finished (exit %d): %s", command, exitCode, l.output.String())
+
+		switch {
+		case err != nil:
+			l.err = fmt.Errorf("tappervpn up: %s: %w", l.output.String(), err)
+		case exitCode != 0:
+			l.err = fmt.Errorf("tappervpn up exited %d: %s: %w", exitCode, l.output.String(), dockertestutil.ErrDockertestCommandFailed)
+		case !l.foundURL:
+			l.err = fmt.Errorf("tappervpn up: %s: %w", l.output.String(), util.ErrNoURLFound)
+		}
+	}()
+
+	return l
+}
+
+func (l *loginAttempt) waitForURL(timeout time.Duration) (*url.URL, error) {
+	select {
+	case u := <-l.url:
+		return u, nil
+	case <-l.done:
+		if l.err != nil {
+			return nil, l.err
+		}
+
+		return <-l.url, nil
+	case <-time.After(timeout):
+		return nil, dockertestutil.ErrDockertestCommandTimeout
+	}
+}
+
+// LoginWithURL runs the login routine on the given TapperVPN instance.
+// This login mechanism uses web + command line flow for authentication.
+func (t *TapperVPNInContainer) LoginWithURL(
+	loginServer string,
+) (*url.URL, error) {
+	command := t.buildLoginCommand(loginServer, "")
+	command = append(command, "--timeout="+loginTimeout.String())
+
+	// Return the URL promptly, but let the CLI finish authentication normally.
+	// Its own timeout bounds abandoned logins; WaitForRunning checks its exit.
+	t.login = startLogin(command, t.container.Exec)
+
+	u, err := t.login.waitForURL(dockerExecuteTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("%s fetching login URL: %w", t.hostname, err)
+	}
+
+	return u, nil
+}
+
+// Logout runs the logout routine on the given TapperVPN instance.
+func (t *TapperVPNInContainer) Logout() error {
+	t.login = nil
+
+	_, _, err := t.Execute([]string{tappervpnBin, "logout"})
+	if err != nil {
+		return err
+	}
+
+	stdout, stderr, _ := t.Execute([]string{tappervpnBin, "status"})
+	if !strings.Contains(stdout+stderr, "Logged out.") {
+		return fmt.Errorf("logging out, stdout: %s, stderr: %s", stdout, stderr) //nolint:err113
+	}
+
+	return t.waitForBackendState("NeedsLogin", integrationutil.PeerSyncTimeout())
+}
+
+// Restart restarts the TapperVPN container using Docker API.
+// This simulates a container restart (e.g., docker restart or Kubernetes pod restart).
+// The container's entrypoint will re-execute, which typically includes running
+// "tappervpn up" with any auth keys stored in environment variables.
+func (t *TapperVPNInContainer) Restart() error {
+	if t.container == nil {
+		return errContainerNotInitialized
+	}
+
+	// Use Docker API to restart the container
+	err := t.pool.Client.RestartContainer(t.container.Container.ID, 30)
+	if err != nil {
+		return fmt.Errorf("restarting container %s: %w", t.hostname, err)
+	}
+
+	// Wait for the container to be back up and tappervpnd to be ready
+	// We use exponential backoff to poll until we can successfully execute a command
+	_, err = backoff.Retry(context.Background(), func() (struct{}, error) {
+		// Try to execute a simple command to verify the container is responsive
+		_, _, err := t.Execute([]string{tappervpnBin, "version"}, dockertestutil.ExecuteCommandTimeout(5*time.Second))
+		if err != nil {
+			return struct{}{}, fmt.Errorf("container not ready: %w", err)
+		}
+
+		return struct{}{}, nil
+	}, backoff.WithBackOff(backoff.NewExponentialBackOff()), backoff.WithMaxElapsedTime(30*time.Second))
+	if err != nil {
+		return fmt.Errorf("timeout waiting for container %s to restart and become ready: %w", t.hostname, err)
+	}
+
+	return nil
+}
+
+// Up runs `tappervpn up` with no arguments.
+func (t *TapperVPNInContainer) Up() error {
+	command := []string{
+		tappervpnBin,
+		"up",
+	}
+
+	if _, _, err := t.Execute(command, dockertestutil.ExecuteCommandTimeout(dockerExecuteTimeout)); err != nil { //nolint:noinlineerr
+		return fmt.Errorf(
+			"%s failed to bring tappervpn client up (%s): %w",
+			t.hostname,
+			strings.Join(command, " "),
+			err,
+		)
+	}
+
+	return nil
+}
+
+// Down runs `tappervpn down` with no arguments.
+func (t *TapperVPNInContainer) Down() error {
+	command := []string{
+		tappervpnBin,
+		"down",
+	}
+
+	if _, _, err := t.Execute(command, dockertestutil.ExecuteCommandTimeout(dockerExecuteTimeout)); err != nil { //nolint:noinlineerr
+		return fmt.Errorf(
+			"%s failed to bring tappervpn client down (%s): %w",
+			t.hostname,
+			strings.Join(command, " "),
+			err,
+		)
+	}
+
+	return nil
+}
+
+// DisconnectFromNetwork detaches the container from network at the
+// docker daemon level. The container's network interface for that
+// network disappears and any in-flight TCP connection is left
+// half-open at the peer — the same failure mode a real cable pull
+// produces, which iptables-based simulations cannot reproduce.
+func (t *TapperVPNInContainer) DisconnectFromNetwork(network *dockertest.Network) error {
+	return dockertestutil.DisconnectContainerFromNetwork(t.pool, network, t.hostname)
+}
+
+// ReconnectToNetwork is the inverse of DisconnectFromNetwork: it
+// re-attaches the container to network so traffic can flow again.
+func (t *TapperVPNInContainer) ReconnectToNetwork(network *dockertest.Network) error {
+	return dockertestutil.ReconnectContainerToNetwork(t.pool, network, t.hostname)
+}
+
+// IPs returns the [netip.Addr] of the TapperVPN instance.
+func (t *TapperVPNInContainer) IPs() ([]netip.Addr, error) {
+	if len(t.ips) != 0 {
+		return t.ips, nil
+	}
+
+	// Retry with exponential backoff to handle eventual consistency
+	ips, err := backoff.Retry(context.Background(), func() ([]netip.Addr, error) {
+		command := []string{
+			tappervpnBin,
+			"ip",
+		}
+
+		result, _, err := t.Execute(command)
+		if err != nil {
+			return nil, fmt.Errorf("%s failed to get IPs: %w", t.hostname, err)
+		}
+
+		ips := make([]netip.Addr, 0)
+
+		for address := range strings.SplitSeq(result, "\n") {
+			address = strings.TrimSuffix(address, "\n")
+			if len(address) < 1 {
+				continue
+			}
+
+			ip, err := netip.ParseAddr(address)
+			if err != nil {
+				return nil, fmt.Errorf("parsing IP %s: %w", address, err)
+			}
+
+			ips = append(ips, ip)
+		}
+
+		if len(ips) == 0 {
+			return nil, fmt.Errorf("no IPs returned yet for %s", t.hostname) //nolint:err113
+		}
+
+		return ips, nil
+	}, backoff.WithBackOff(backoff.NewExponentialBackOff()), backoff.WithMaxElapsedTime(10*time.Second))
+	if err != nil {
+		return nil, fmt.Errorf("getting IPs for %s after retries: %w", t.hostname, err)
+	}
+
+	return ips, nil
+}
+
+func (t *TapperVPNInContainer) MustIPs() []netip.Addr {
+	ips, err := t.IPs()
+	if err != nil {
+		panic(err)
+	}
+
+	return ips
+}
+
+// IPv4 returns the IPv4 address of the TapperVPN instance.
+func (t *TapperVPNInContainer) IPv4() (netip.Addr, error) {
+	ips, err := t.IPs()
+	if err != nil {
+		return netip.Addr{}, err
+	}
+
+	for _, ip := range ips {
+		if ip.Is4() {
+			return ip, nil
+		}
+	}
+
+	return netip.Addr{}, fmt.Errorf("no IPv4 address found for %s", t.hostname) //nolint:err113
+}
+
+func (t *TapperVPNInContainer) MustIPv4() netip.Addr {
+	ip, err := t.IPv4()
+	if err != nil {
+		panic(err)
+	}
+
+	return ip
+}
+
+func (t *TapperVPNInContainer) MustIPv6() netip.Addr {
+	for _, ip := range t.MustIPs() {
+		if ip.Is6() {
+			return ip
+		}
+	}
+
+	panic("no ipv6 found")
+}
+
+// execJSON runs command on the TapperVPN instance, unmarshals the stdout into a
+// fresh T, and returns the value alongside the raw JSON for callers that persist
+// it. stderr is printed when the command fails. execErr and unmarshalErr provide
+// the error context used in test diagnostics.
+func (t *TapperVPNInContainer) execJSON[T any](
+	command []string,
+	execErr, unmarshalErr string,
+) (*T, string, error) {
+	result, stderr, err := t.Execute(command)
+	if err != nil {
+		fmt.Printf("stderr: %s\n", stderr)
+		return nil, "", fmt.Errorf("%s: %w", execErr, err)
+	}
+
+	var v T
+
+	err = json.Unmarshal([]byte(result), &v)
+	if err != nil {
+		return nil, "", fmt.Errorf("%s: %w", unmarshalErr, err)
+	}
+
+	return &v, result, nil
+}
+
+// Status returns the [ipnstate.Status] of the TapperVPN instance.
+func (t *TapperVPNInContainer) Status(save ...bool) (*ipnstate.Status, error) {
+	command := []string{
+		tappervpnBin,
+		"status",
+		"--json",
+	}
+
+	status, raw, err := t.execJSON[ipnstate.Status](
+		command,
+		"executing tappervpn status command",
+		"unmarshalling tappervpn status",
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	err = os.WriteFile(fmt.Sprintf("/tmp/control/%s_status.json", t.hostname), []byte(raw), 0o755) //nolint:gosec // test infrastructure log files
+	if err != nil {
+		return nil, fmt.Errorf("status netmap to /tmp/control: %w", err)
+	}
+
+	return status, nil
+}
+
+// MustStatus returns the [ipnstate.Status] of the TapperVPN instance.
+func (t *TapperVPNInContainer) MustStatus() *ipnstate.Status {
+	status, err := t.Status()
+	if err != nil {
+		panic(err)
+	}
+
+	return status
+}
+
+// MustID returns the ID of the TapperVPN instance.
+func (t *TapperVPNInContainer) MustID() types.NodeID {
+	status, err := t.Status()
+	if err != nil {
+		panic(err)
+	}
+
+	id, err := strconv.ParseUint(string(status.Self.ID), 10, 64)
+	if err != nil {
+		panic(fmt.Sprintf("parsing ID: %s", err))
+	}
+
+	return types.NodeID(id)
+}
+
+// Netmap returns the current Netmap ([netmap.NetworkMap]) of the TapperVPN instance.
+// Only works with TapperVPN 1.56 and newer.
+// Panics if version is lower then minimum.
+func (t *TapperVPNInContainer) Netmap() (*netmap.NetworkMap, error) {
+	if !util.TapperVPNVersionNewerOrEqual("1.56", t.version) {
+		panic("tsic.Netmap() called with unsupported version: " + t.version)
+	}
+
+	command := []string{
+		tappervpnBin,
+		"debug",
+		"netmap",
+	}
+
+	nm, raw, err := t.execJSON[netmap.NetworkMap](
+		command,
+		"executing tappervpn debug netmap command",
+		"unmarshalling tappervpn netmap",
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	err = os.WriteFile(fmt.Sprintf("/tmp/control/%s_netmap.json", t.hostname), []byte(raw), 0o755) //nolint:gosec // test infrastructure log files
+	if err != nil {
+		return nil, fmt.Errorf("saving netmap to /tmp/control: %w", err)
+	}
+
+	return nm, nil
+}
+
+func (t *TapperVPNInContainer) DebugDERPRegion(region string) (*ipnstate.DebugDERPRegionReport, error) {
+	if !util.TapperVPNVersionNewerOrEqual("1.34", t.version) {
+		panic("tsic.DebugDERPRegion() called with unsupported version: " + t.version)
+	}
+
+	command := []string{
+		tappervpnBin,
+		"debug",
+		"derp",
+		region,
+	}
+
+	report, _, err := t.execJSON[ipnstate.DebugDERPRegionReport](
+		command,
+		"executing tappervpn debug derp command",
+		"unmarshalling tappervpn derp region report",
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return report, nil
+}
+
+// Netcheck returns the current Netcheck Report ([netcheck.Report]) of the TapperVPN instance.
+func (t *TapperVPNInContainer) Netcheck() (*netcheck.Report, error) {
+	command := []string{
+		tappervpnBin,
+		"netcheck",
+		"--format=json",
+	}
+
+	nm, _, err := t.execJSON[netcheck.Report](
+		command,
+		"executing tappervpn debug netcheck command",
+		"unmarshalling tappervpn netcheck",
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return nm, nil
+}
+
+// FQDN returns the FQDN as a string of the TapperVPN instance.
+func (t *TapperVPNInContainer) FQDN() (string, error) {
+	if t.fqdn != "" {
+		return t.fqdn, nil
+	}
+
+	// Retry with exponential backoff to handle eventual consistency
+	fqdn, err := backoff.Retry(context.Background(), func() (string, error) {
+		status, err := t.Status()
+		if err != nil {
+			return "", fmt.Errorf("getting status: %w", err)
+		}
+
+		if status.Self.DNSName == "" {
+			return "", errFQDNNotYetAvailable
+		}
+
+		return status.Self.DNSName, nil
+	}, backoff.WithBackOff(backoff.NewExponentialBackOff()), backoff.WithMaxElapsedTime(10*time.Second))
+	if err != nil {
+		return "", fmt.Errorf("getting FQDN for %s after retries: %w", t.hostname, err)
+	}
+
+	return fqdn, nil
+}
+
+// MustFQDN returns the FQDN as a string of the TapperVPN instance, panicking on error.
+func (t *TapperVPNInContainer) MustFQDN() string {
+	fqdn, err := t.FQDN()
+	if err != nil {
+		panic(err)
+	}
+
+	return fqdn
+}
+
+// FailingPeersAsString returns a formatted-ish multi-line-string of peers in the client
+// and a bool indicating if the clients online count and peer count is equal.
+func (t *TapperVPNInContainer) FailingPeersAsString() (string, bool, error) {
+	status, err := t.Status()
+	if err != nil {
+		return "", false, fmt.Errorf("getting FQDN: %w", err)
+	}
+
+	var b strings.Builder
+
+	fmt.Fprintf(&b, "Peers of %s\n", t.hostname)
+	fmt.Fprint(&b, "Hostname\tOnline\tLastSeen\n")
+
+	peerCount := len(status.Peers())
+	onlineCount := 0
+
+	for _, peerKey := range status.Peers() {
+		peer := status.Peer[peerKey]
+
+		if peer.Online {
+			onlineCount++
+		}
+
+		fmt.Fprintf(&b, "%s\t%t\t%s\n", peer.HostName, peer.Online, peer.LastSeen)
+	}
+
+	fmt.Fprintf(&b, "Peer Count: %d, Online Count: %d\n\n", peerCount, onlineCount)
+
+	return b.String(), peerCount == onlineCount, nil
+}
+
+// WaitForNeedsLogin blocks until the TapperVPN (tappervpnd) instance has
+// started and needs to be logged into.
+func (t *TapperVPNInContainer) WaitForNeedsLogin(timeout time.Duration) error {
+	return t.waitForBackendState("NeedsLogin", timeout)
+}
+
+// WaitForRunning blocks until the TapperVPN (tappervpnd) instance is logged in
+// and ready to be used, and the current web login command has exited successfully.
+func (t *TapperVPNInContainer) WaitForRunning(timeout time.Duration) error {
+	return t.waitForBackendState("Running", timeout)
+}
+
+func (t *TapperVPNInContainer) waitForBackendState(state string, timeout time.Duration) error {
+	ticker := time.NewTicker(integrationutil.PeerSyncRetryInterval())
+	defer ticker.Stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	if state == "Running" && t.login != nil {
+		select {
+		case <-t.login.done:
+			if t.login.err != nil {
+				return fmt.Errorf("%s login failed: %w", t.hostname, t.login.err)
+			}
+		case <-ctx.Done():
+			return fmt.Errorf("%s waiting for login command: %w", t.hostname, ctx.Err())
+		}
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timeout waiting for backend state %s on %s after %v", state, t.hostname, timeout) //nolint:err113
+		case <-ticker.C:
+			status, err := t.Status()
+			if err != nil {
+				continue // Keep retrying on status errors
+			}
+
+			// [ipnstate.Status.CurrentTailnet] was added in TapperVPN 1.22.0
+			// https://github.com/tailscale/tailscale/pull/3865
+			//
+			// Before that, we can check the BackendState to see if the
+			// tappervpnd daemon is connected to the control system.
+			if status.BackendState == state {
+				return nil
+			}
+		}
+	}
+}
+
+// WaitForPeers blocks until N number of peers is present in the
+// Peer list of the TapperVPN instance and is reporting Online.
+//
+// The method verifies that each peer:
+// - Has the expected peer count
+// - All peers are Online
+// - All peers have a hostname
+// - All peers have a DERP relay assigned
+//
+// Uses multierr to collect all validation errors.
+func (t *TapperVPNInContainer) WaitForPeers(expected int, timeout, retryInterval time.Duration) error {
+	ticker := time.NewTicker(retryInterval)
+	defer ticker.Stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	var lastErrs []error
+
+	for {
+		select {
+		case <-ctx.Done():
+			if len(lastErrs) > 0 {
+				return fmt.Errorf("timeout waiting for %d peers on %s after %v, errors: %w", expected, t.hostname, timeout, multierr.New(lastErrs...))
+			}
+
+			return fmt.Errorf("timeout waiting for %d peers on %s after %v", expected, t.hostname, timeout) //nolint:err113
+		case <-ticker.C:
+			status, err := t.Status()
+			if err != nil {
+				lastErrs = []error{errTapperVPNStatus(t.hostname, err)}
+				continue // Keep retrying on status errors
+			}
+
+			if peers := status.Peers(); len(peers) != expected {
+				lastErrs = []error{fmt.Errorf(
+					"%s err: %w expected %d, got %d",
+					t.hostname,
+					errTapperVPNWrongPeerCount,
+					expected,
+					len(peers),
+				)}
+
+				continue
+			}
+
+			// Verify that the peers of a given node is Online
+			// has a hostname and a DERP relay.
+			var peerErrors []error
+
+			for _, peerKey := range status.Peers() {
+				peer := status.Peer[peerKey]
+
+				if !peer.Online {
+					peerErrors = append(peerErrors, fmt.Errorf("[%s] peer count correct, but %s is not online", t.hostname, peer.HostName)) //nolint:err113
+				}
+
+				if peer.HostName == "" {
+					peerErrors = append(peerErrors, fmt.Errorf("[%s] peer count correct, but %s does not have a Hostname", t.hostname, peer.HostName)) //nolint:err113
+				}
+
+				if peer.Relay == "" {
+					peerErrors = append(peerErrors, fmt.Errorf("[%s] peer count correct, but %s does not have a DERP", t.hostname, peer.HostName)) //nolint:err113
+				}
+			}
+
+			if len(peerErrors) > 0 {
+				lastErrs = peerErrors
+				continue
+			}
+
+			return nil
+		}
+	}
+}
+
+type (
+	// PingOption represent optional settings that can be given
+	// to ping another host.
+	PingOption = func(args *pingArgs)
+
+	pingArgs struct {
+		timeout time.Duration
+		count   int
+		direct  bool
+	}
+)
+
+// WithPingTimeout sets the timeout for the ping command.
+func WithPingTimeout(timeout time.Duration) PingOption {
+	return func(args *pingArgs) {
+		args.timeout = timeout
+	}
+}
+
+// WithPingCount sets the count of pings to attempt.
+func WithPingCount(count int) PingOption {
+	return func(args *pingArgs) {
+		args.count = count
+	}
+}
+
+// WithPingUntilDirect decides if the ping should only succeed
+// if a direct connection is established or if successful
+// DERP ping is sufficient.
+func WithPingUntilDirect(direct bool) PingOption {
+	return func(args *pingArgs) {
+		args.direct = direct
+	}
+}
+
+// Ping executes the TapperVPN ping command and pings a hostname
+// or IP. It accepts a series of [PingOption].
+// TODO(kradalby): Make multiping, go routine magic.
+func (t *TapperVPNInContainer) Ping(hostnameOrIP string, opts ...PingOption) error {
+	args := pingArgs{
+		timeout: defaultPingTimeoutVal(),
+		count:   defaultPingCount,
+		direct:  true,
+	}
+
+	for _, opt := range opts {
+		opt(&args)
+	}
+
+	command := make([]string, 0, 6)
+	command = append(
+		command,
+		tappervpnBin, "ping",
+		fmt.Sprintf("--timeout=%s", args.timeout),
+		fmt.Sprintf("--c=%d", args.count),
+		"--until-direct="+strconv.FormatBool(args.direct),
+		hostnameOrIP,
+	)
+
+	result, _, err := t.Execute(
+		command,
+		dockertestutil.ExecuteCommandTimeout(
+			time.Duration(int64(args.timeout)*int64(args.count)),
+		),
+	)
+	if err != nil {
+		log.Printf("command: %v", command)
+		log.Printf(
+			"running ping command from %s to %s, err: %s",
+			t.Hostname(),
+			hostnameOrIP,
+			err,
+		)
+
+		return err
+	}
+
+	if strings.Contains(result, "is local") {
+		return nil
+	}
+
+	if !strings.Contains(result, "pong") {
+		return errTapperVPNPingFailed
+	}
+
+	if !args.direct {
+		// Non-direct mode accepts any indirect path: DERP, a plain
+		// tappervpn relay, or a peer relay. TapperVPN reports peer
+		// relay hops as "via peer-relay(ip:port:vni:N)", which does
+		// not contain the "via relay" substring and was previously
+		// rejected here.
+		if strings.Contains(result, "via DERP") ||
+			strings.Contains(result, "via relay") ||
+			strings.Contains(result, "via peer-relay") {
+			return nil
+		} else {
+			return errTapperVPNPingNotDERP
+		}
+	}
+
+	return nil
+}
+
+type (
+	// CurlOption repreent optional settings that can be given
+	// to curl another host.
+	CurlOption = func(args *curlArgs)
+
+	curlArgs struct {
+		connectionTimeout time.Duration
+		maxTime           time.Duration
+		retry             int
+		retryDelay        time.Duration
+		retryMaxTime      time.Duration
+	}
+)
+
+// WithCurlConnectionTimeout sets the timeout for each connection started
+// by curl.
+func WithCurlConnectionTimeout(timeout time.Duration) CurlOption {
+	return func(args *curlArgs) {
+		args.connectionTimeout = timeout
+	}
+}
+
+// WithCurlMaxTime sets the max time for a transfer for each connection started
+// by curl.
+func WithCurlMaxTime(t time.Duration) CurlOption {
+	return func(args *curlArgs) {
+		args.maxTime = t
+	}
+}
+
+// WithCurlRetry sets the number of retries a connection is attempted by curl.
+func WithCurlRetry(ret int) CurlOption {
+	return func(args *curlArgs) {
+		args.retry = ret
+	}
+}
+
+const (
+	defaultConnectionTimeout = 1 * time.Second
+	defaultMaxTime           = 3 * time.Second
+	defaultRetry             = 3
+	defaultRetryDelay        = 200 * time.Millisecond
+	defaultRetryMaxTime      = 5 * time.Second
+)
+
+// Curl executes the TapperVPN curl command and curls a hostname
+// or IP. It accepts a series of [CurlOption].
+func (t *TapperVPNInContainer) Curl(url string, opts ...CurlOption) (string, error) {
+	args := curlArgs{
+		connectionTimeout: defaultConnectionTimeout,
+		maxTime:           defaultMaxTime,
+		retry:             defaultRetry,
+		retryDelay:        defaultRetryDelay,
+		retryMaxTime:      defaultRetryMaxTime,
+	}
+
+	for _, opt := range opts {
+		opt(&args)
+	}
+
+	command := []string{
+		"curl",
+		"--silent",
+		"--connect-timeout", strconv.Itoa(int(args.connectionTimeout.Seconds())),
+		"--max-time", strconv.Itoa(int(args.maxTime.Seconds())),
+		"--retry", strconv.Itoa(args.retry),
+		"--retry-delay", strconv.Itoa(int(args.retryDelay.Seconds())),
+		"--retry-max-time", strconv.Itoa(int(args.retryMaxTime.Seconds())),
+		url,
+	}
+
+	var result string
+
+	result, _, err := t.Execute(command)
+	if err != nil {
+		log.Printf(
+			"running curl command from %s to %s, err: %s",
+			t.Hostname(),
+			url,
+			err,
+		)
+
+		return result, err
+	}
+
+	// curl exit 0 with an empty body usually means a mid-stream reset
+	// after headers (HTTP 200 with the connection torn down before the
+	// body arrived). Without this signal, callers wrapping the call in
+	// [assert.EventuallyWithT] see [assert.NoError] pass and [assert.Len] fail with
+	// no error to drive a retry.
+	if result == "" {
+		return result, fmt.Errorf("%w: %s from %s", errCurlEmptyResponseBody, url, t.Hostname())
+	}
+
+	return result, nil
+}
+
+// CurlFailFast executes the TapperVPN curl command with aggressive timeouts
+// optimized for testing expected connection failures. It uses minimal timeouts
+// to quickly detect blocked connections without waiting for multiple retries.
+func (t *TapperVPNInContainer) CurlFailFast(url string) (string, error) {
+	// Use aggressive timeouts for fast failure detection
+	return t.Curl(url,
+		WithCurlConnectionTimeout(1*time.Second),
+		WithCurlMaxTime(2*time.Second),
+		WithCurlRetry(1))
+}
+
+func (t *TapperVPNInContainer) Traceroute(ip netip.Addr) (util.Traceroute, error) {
+	// -w 1: wait at most 1s for each probe response. busybox's default
+	//       is 5s, which means an [assert.EventuallyWithT] loop at 200ms ticks
+	//       can spend 25 ticks worth of budget on a single Traceroute.
+	// -q 1: send 1 probe per hop instead of 3. The HA tests only care
+	//       about the first hop's identity; the other probes are dead
+	//       weight for the same retry budget.
+	command := []string{
+		"traceroute",
+		"-w", "1",
+		"-q", "1",
+		ip.String(),
+	}
+
+	var result util.Traceroute
+
+	stdout, stderr, err := t.Execute(command)
+	if err != nil {
+		return result, err
+	}
+
+	result, err = util.ParseTraceroute(stdout + stderr)
+	if err != nil {
+		return result, err
+	}
+
+	return result, nil
+}
+
+// WriteFile save file inside the TapperVPN container.
+func (t *TapperVPNInContainer) WriteFile(path string, data []byte) error {
+	return integrationutil.WriteFileToContainer(t.pool, t.container, path, data)
+}
+
+// SaveLog saves the current stdout log of the container to a path
+// on the host system.
+func (t *TapperVPNInContainer) SaveLog(path string) (string, string, error) {
+	// TODO(kradalby): Assert if tappervpn logs contains panics.
+	// NOTE(enoperm): `t.WriteLog | countMatchingLines`
+	// is probably most of what is for that,
+	// but I'd rather not change the behaviour here,
+	// as it may affect all the other tests
+	// I have not otherwise touched.
+	return dockertestutil.SaveLog(t.pool, t.container, path)
+}
+
+// WriteLogs writes the current stdout/stderr log of the container to
+// the given [io.Writer]s.
+func (t *TapperVPNInContainer) WriteLogs(stdout, stderr io.Writer) error {
+	return dockertestutil.WriteLog(t.pool, t.container, stdout, stderr)
+}
+
+// ReadFile reads a file from the TapperVPN container.
+// It returns the content of the file as a byte slice.
+func (t *TapperVPNInContainer) ReadFile(path string) ([]byte, error) {
+	tarBytes, err := integrationutil.FetchPathFromContainer(t.pool, t.container, path)
+	if err != nil {
+		return nil, fmt.Errorf("reading file from container: %w", err)
+	}
+
+	var out bytes.Buffer
+
+	tr := tar.NewReader(bytes.NewReader(tarBytes))
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break // End of archive
+		}
+
+		if err != nil {
+			return nil, fmt.Errorf("reading tar header: %w", err)
+		}
+
+		if !strings.Contains(path, hdr.Name) {
+			return nil, fmt.Errorf("file not found in tar archive, looking for: %s, header was: %s", path, hdr.Name) //nolint:err113
+		}
+
+		if _, err := io.Copy(&out, tr); err != nil { //nolint:gosec,noinlineerr // trusted tar from test container
+			return nil, fmt.Errorf("copying file to buffer: %w", err)
+		}
+
+		// Only support reading the first tile
+		break //nolint:staticcheck // SA4004: intentional - only read first file
+	}
+
+	if out.Len() == 0 {
+		return nil, errors.New("file is empty") //nolint:err113
+	}
+
+	return out.Bytes(), nil
+}
+
+func (t *TapperVPNInContainer) GetNodePrivateKey() (*key.NodePrivate, error) {
+	state, err := t.ReadFile(paths.DefaultTapperVPNdStateFile())
+	if err != nil {
+		return nil, fmt.Errorf("reading state file: %w", err)
+	}
+
+	store := &mem.Store{}
+	if err = store.LoadFromJSON(state); err != nil { //nolint:noinlineerr
+		return nil, fmt.Errorf("unmarshalling state file: %w", err)
+	}
+
+	currentProfileKey, err := store.ReadState(ipn.CurrentProfileStateKey)
+	if err != nil {
+		return nil, fmt.Errorf("reading current profile state key: %w", err)
+	}
+
+	currentProfile, err := store.ReadState(ipn.StateKey(currentProfileKey))
+	if err != nil {
+		return nil, fmt.Errorf("reading current profile state: %w", err)
+	}
+
+	p := &ipn.Prefs{}
+	if err = json.Unmarshal(currentProfile, &p); err != nil { //nolint:noinlineerr
+		return nil, fmt.Errorf("unmarshalling current profile state: %w", err)
+	}
+
+	return &p.Persist.PrivateNodeKey, nil
+}
+
+// ConnectToNetwork connects the TapperVPN container to an additional Docker [dockertest.Network].
+func (t *TapperVPNInContainer) ConnectToNetwork(network *dockertest.Network) error {
+	return t.container.ConnectToNetwork(network)
+}
+
+// PacketFilter returns the current packet filter rules from the client's network map.
+// This is useful for verifying that policy changes have propagated to the client.
+func (t *TapperVPNInContainer) PacketFilter() ([]filter.Match, error) {
+	if !util.TapperVPNVersionNewerOrEqual("1.56", t.version) {
+		return nil, fmt.Errorf("tsic.PacketFilter() requires TapperVPN 1.56+, current version: %s", t.version) //nolint:err113
+	}
+
+	nm, err := t.Netmap()
+	if err != nil {
+		return nil, fmt.Errorf("getting netmap: %w", err)
+	}
+
+	return nm.PacketFilter, nil
+}

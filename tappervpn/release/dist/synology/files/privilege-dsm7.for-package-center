@@ -1,0 +1,13 @@
+{
+  "defaults":{
+    "run-as": "package"
+  },
+  "username": "tappervpn",
+  "groupname": "tappervpn",
+  "tool": [{
+    "relpath": "bin/tappervpnd",
+    "user": "package",
+    "group": "package",
+    "capabilities": "cap_net_admin,cap_chown,cap_net_raw"
+  }]
+}

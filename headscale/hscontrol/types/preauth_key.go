@@ -1,0 +1,200 @@
+package types
+
+import (
+	"strconv"
+	"time"
+
+	"github.com/juanfont/headscale/hscontrol/util"
+	"github.com/juanfont/headscale/hscontrol/util/zlog/zf"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
+)
+
+type PAKError string
+
+func (e PAKError) Error() string { return string(e) }
+
+// StringID returns the key's id as a decimal string, the form the HTTP APIs
+// render it as.
+func (pak *PreAuthKey) StringID() string {
+	if pak == nil {
+		return ""
+	}
+
+	return strconv.FormatUint(pak.ID, util.Base10)
+}
+
+// StringID returns the key's id as a decimal string, the form the HTTP APIs
+// render it as.
+func (pak *PreAuthKeyNew) StringID() string {
+	if pak == nil {
+		return ""
+	}
+
+	return strconv.FormatUint(pak.ID, util.Base10)
+}
+
+// PreAuthKey is the API/state projection of a [Credential] of kind authkey.
+// Its gorm tags remain only for the post-0.29 migrations that still alter the
+// legacy pre_auth_keys table.
+//
+// TODO(kradalby): drop the gorm tags in 0.31 with the credentials migration.
+type PreAuthKey struct {
+	ID uint64 `gorm:"primary_key"`
+
+	// Prefix is the credential identifier; Hash is the stored secret hash.
+	Prefix string
+	Hash   []byte
+
+	// For tagged keys: [PreAuthKey.UserID] tracks who created the key (informational)
+	// For user-owned keys: [PreAuthKey.UserID] tracks the node owner
+	// Can be nil for system-created tagged keys
+	UserID *uint
+	User   *User `gorm:"constraint:OnDelete:SET NULL;"`
+
+	// Free-text description, set via the v2 API. Empty for keys created through
+	// the v1 API or CLI.
+	Description string
+
+	Reusable  bool
+	Ephemeral bool `gorm:"default:false"`
+	Used      bool `gorm:"default:false"`
+
+	// Tags to assign to nodes registered with this key.
+	// Tags are copied to the node during registration.
+	// If non-empty, this creates tagged nodes (not user-owned).
+	Tags []string `gorm:"serializer:json"`
+
+	CreatedAt  *time.Time
+	Expiration *time.Time
+
+	// Revoked is set when the key is revoked through the v2 API (TapperVPN's
+	// DELETE). A revoked key is invalid but kept retrievable until the
+	// background collector reaps it after the configured retention window.
+	Revoked *time.Time
+}
+
+// PreAuthKeyNew is returned once when the key is created.
+type PreAuthKeyNew struct {
+	ID         uint64 `gorm:"primary_key"`
+	Key        string
+	Reusable   bool
+	Ephemeral  bool
+	Tags       []string
+	Expiration *time.Time
+	CreatedAt  *time.Time
+	User       *User // Can be nil for system-created tagged keys
+}
+
+// Validate checks if a pre auth key can be used.
+func (pak *PreAuthKey) Validate() error {
+	if pak == nil {
+		return PAKError("invalid authkey")
+	}
+
+	// Use [zerolog.Event.EmbedObject] for safe logging - never log full key
+	log.Debug().
+		Caller().
+		EmbedObject(pak).
+		Msg("PreAuthKey.Validate: checking key")
+
+	return pak.ValidAt(time.Now())
+}
+
+// ValidAt is [PreAuthKey.Validate] at a caller-chosen instant, without
+// logging, so a NodeStore writer can decide at its own clock.
+func (pak *PreAuthKey) ValidAt(now time.Time) error {
+	if pak == nil {
+		return PAKError("invalid authkey")
+	}
+
+	if pak.Revoked != nil {
+		return PAKError("authkey revoked")
+	}
+
+	if pak.Expiration != nil && pak.Expiration.Before(now) {
+		return PAKError("authkey expired")
+	}
+
+	// we don't need to check if has been used before
+	if pak.Reusable {
+		return nil
+	}
+
+	if pak.Used {
+		return PAKError("authkey already used")
+	}
+
+	return nil
+}
+
+// IsTagged returns true if this [PreAuthKey] creates tagged nodes.
+// When a [PreAuthKey] has tags, nodes registered with it will be tagged nodes.
+func (pak *PreAuthKey) IsTagged() bool {
+	return len(pak.Tags) > 0
+}
+
+// Username returns the associated user's name, or TaggedDevices for a key
+// without a user. For tagged keys the associated user is the creator.
+func (pak *PreAuthKey) Username() string {
+	if pak.User != nil {
+		return pak.User.Username()
+	}
+
+	return TaggedDevices.Name
+}
+
+// ConvertsNodeToTagged reports whether this key changes a user-owned node
+// to tag ownership.
+func (pak *PreAuthKey) ConvertsNodeToTagged(node NodeView) bool {
+	return node.Valid() && pak.IsTagged() && !node.IsTagged()
+}
+
+// RetagsNode reports whether this key replaces an already-tagged node's
+// tags. Reusing the last key preserves subsequent admin tag changes.
+func (pak *PreAuthKey) RetagsNode(node NodeView) bool {
+	return node.IsTagged() && pak.IsTagged() &&
+		(!node.AuthKeyID().Valid() || node.AuthKeyID().Get() != pak.ID)
+}
+
+// maskedPrefix returns the key prefix in masked format for safe logging.
+// SECURITY: Never log the full key or hash, only the masked prefix.
+func (pak *PreAuthKey) maskedPrefix() string {
+	if pak.Prefix != "" {
+		return "hskey-auth-" + pak.Prefix + "-***"
+	}
+
+	return ""
+}
+
+// MarshalZerologObject implements [zerolog.LogObjectMarshaler] for safe logging.
+// SECURITY: This method intentionally does NOT log the full key or hash.
+// Only the masked prefix is logged for identification purposes.
+func (pak *PreAuthKey) MarshalZerologObject(e *zerolog.Event) {
+	if pak == nil {
+		return
+	}
+
+	e.Uint64(zf.PAKID, pak.ID)
+	e.Bool(zf.PAKReusable, pak.Reusable)
+	e.Bool(zf.PAKEphemeral, pak.Ephemeral)
+	e.Bool(zf.PAKUsed, pak.Used)
+	e.Bool(zf.PAKIsTagged, pak.IsTagged())
+
+	// SECURITY: Only log masked prefix, never full key or hash
+	if masked := pak.maskedPrefix(); masked != "" {
+		e.Str(zf.PAKPrefix, masked)
+	}
+
+	if len(pak.Tags) > 0 {
+		e.Strs(zf.PAKTags, pak.Tags)
+	}
+
+	if pak.User != nil {
+		e.Str(zf.UserName, pak.User.Username())
+	}
+
+	if pak.Expiration != nil {
+		e.Time(zf.PAKExpiration, *pak.Expiration)
+	}
+}

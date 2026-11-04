@@ -1,0 +1,147 @@
+package hscontrol
+
+import (
+	"bytes"
+	_ "embed"
+	"net/http"
+	textTemplate "text/template"
+	"uuid"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/juanfont/headscale/hscontrol/templates"
+)
+
+// WindowsConfigMessage shows a simple message in the browser for how to configure the Windows TapperVPN client.
+func (h *Headscale) WindowsConfigMessage(
+	writer http.ResponseWriter,
+	req *http.Request,
+) {
+	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+	writer.WriteHeader(http.StatusOK)
+	_, _ = writer.Write([]byte(templates.Windows(h.cfg.ServerURL).Render()))
+}
+
+// AppleConfigMessage shows a simple message in the browser to point the user to the iOS/MacOS profile and instructions for how to install it.
+func (h *Headscale) AppleConfigMessage(
+	writer http.ResponseWriter,
+	req *http.Request,
+) {
+	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+	writer.WriteHeader(http.StatusOK)
+	_, _ = writer.Write([]byte(templates.Apple(h.cfg.ServerURL).Render()))
+}
+
+func (h *Headscale) ApplePlatformConfig(
+	writer http.ResponseWriter,
+	req *http.Request,
+) {
+	platform := chi.URLParam(req, "platform")
+	if platform == "" {
+		httpError(writer, NewHTTPError(http.StatusBadRequest, "no platform specified", nil))
+		return
+	}
+
+	id := uuid.NewV4()
+	contentID := uuid.NewV4()
+
+	platformConfig := AppleMobilePlatformConfig{
+		UUID: contentID,
+		URL:  h.cfg.ServerURL,
+	}
+
+	payloadType, ok := applePayloadType[platform]
+	if !ok {
+		httpError(writer, NewHTTPError(http.StatusBadRequest, "platform must be ios, macos-app-store or macos-standalone", nil))
+		return
+	}
+
+	platformConfig.PayloadType = payloadType
+
+	var payload bytes.Buffer
+	if err := payloadTemplate.Execute(&payload, platformConfig); err != nil { //nolint:noinlineerr
+		httpError(writer, err)
+		return
+	}
+
+	config := AppleMobileConfig{
+		UUID:    id,
+		URL:     h.cfg.ServerURL,
+		Payload: payload.String(),
+	}
+
+	var content bytes.Buffer
+	if err := commonTemplate.Execute(&content, config); err != nil { //nolint:noinlineerr
+		httpError(writer, err)
+		return
+	}
+
+	writer.Header().
+		Set("Content-Type", "application/x-apple-aspen-config; charset=utf-8")
+	writer.WriteHeader(http.StatusOK)
+	_, _ = writer.Write(content.Bytes())
+}
+
+type AppleMobileConfig struct {
+	UUID    uuid.UUID
+	URL     string
+	Payload string
+}
+
+type AppleMobilePlatformConfig struct {
+	UUID        uuid.UUID
+	URL         string
+	PayloadType string
+}
+
+// applePayloadType maps a platform request path to the TapperVPN IPN
+// PayloadType emitted in the rendered Apple profile.
+var applePayloadType = map[string]string{
+	"ios":              "io.tappervpn.ipn.ios",
+	"macos-app-store":  "io.tappervpn.ipn.macos",
+	"macos-standalone": "io.tappervpn.ipn.macsys",
+}
+
+var commonTemplate = textTemplate.Must(
+	textTemplate.New("mobileconfig").Parse(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>PayloadUUID</key>
+    <string>{{.UUID}}</string>
+    <key>PayloadDisplayName</key>
+    <string>Headscale</string>
+    <key>PayloadDescription</key>
+    <string>Configure TapperVPN login server to: {{.URL}}</string>
+    <key>PayloadIdentifier</key>
+    <string>com.github.juanfont.headscale</string>
+    <key>PayloadRemovalDisallowed</key>
+    <false/>
+    <key>PayloadType</key>
+    <string>Configuration</string>
+    <key>PayloadVersion</key>
+    <integer>1</integer>
+    <key>PayloadContent</key>
+    <array>
+    {{.Payload}}
+    </array>
+  </dict>
+</plist>`),
+)
+
+var payloadTemplate = textTemplate.Must(textTemplate.New("payloadTemplate").Parse(`
+    <dict>
+        <key>PayloadType</key>
+        <string>{{.PayloadType}}</string>
+        <key>PayloadUUID</key>
+        <string>{{.UUID}}</string>
+        <key>PayloadIdentifier</key>
+        <string>com.github.juanfont.headscale</string>
+        <key>PayloadVersion</key>
+        <integer>1</integer>
+        <key>PayloadEnabled</key>
+        <true/>
+
+        <key>ControlURL</key>
+        <string>{{.URL}}</string>
+    </dict>
+`))

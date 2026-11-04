@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=TapperVPN System Tray
+Comment=TapperVPN system tray applet for managing TapperVPN
+Exec=/usr/bin/tappervpn systray
+TryExec=/usr/bin/tappervpn
+Terminal=false
+NoDisplay=true
+StartupNotify=false
+Icon=tappervpn
+Categories=Network;System;
+X-GNOME-Autostart-enabled=true

@@ -1,4 +1,4 @@
-# Runs the meshwall node daemon in the foreground. Must be run as Administrator,
+# Runs the TapperVPN node daemon in the foreground. Must be run as Administrator,
 # because it creates the Wintun tunnel adapter.
 #
 #   -Policy <file>  per-app routing policy (JSON) to use when the control server
@@ -20,4 +20,4 @@ if ($Policy) {
 if ($LogFlows) { $env:TS_DEBUG_APPROUTING = "true" }
 
 New-Item -ItemType Directory -Force "$root\node\state" | Out-Null
-& "$root\bin\tailscaled.exe" --statedir="$root\node\state"
+& "$root\bin\tappervpnd.exe" --statedir="$root\node\state"

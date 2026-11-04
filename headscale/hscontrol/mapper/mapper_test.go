@@ -1,0 +1,1183 @@
+package mapper
+
+import (
+	"errors"
+	"fmt"
+	"net/netip"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/juanfont/headscale/hscontrol/db"
+	"github.com/juanfont/headscale/hscontrol/dns"
+	"github.com/juanfont/headscale/hscontrol/state"
+	"github.com/juanfont/headscale/hscontrol/types"
+	"github.com/juanfont/headscale/hscontrol/types/change"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
+	"tappervpn.com/tailcfg"
+	"tappervpn.com/types/dnstype"
+)
+
+var iap = func(ipStr string) *netip.Addr {
+	ip := netip.MustParseAddr(ipStr)
+	return &ip
+}
+
+func TestDNSConfigMapResponse(t *testing.T) {
+	tests := []struct {
+		magicDNS bool
+		want     *tailcfg.DNSConfig
+	}{
+		{
+			magicDNS: true,
+			want: &tailcfg.DNSConfig{
+				Routes: map[string][]*dnstype.Resolver{},
+				Domains: []string{
+					"foobar.headscale.net",
+				},
+				Proxied: true,
+			},
+		},
+		{
+			magicDNS: false,
+			want: &tailcfg.DNSConfig{
+				Domains: []string{"foobar.headscale.net"},
+				Proxied: false,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("with-magicdns-%v", tt.magicDNS), func(t *testing.T) {
+			mach := func(hostname, username string, userid uint) *types.Node {
+				return &types.Node{
+					Hostname: hostname,
+					UserID:   new(userid),
+					User: &types.User{
+						Name: username,
+					},
+				}
+			}
+
+			baseDomain := "foobar.headscale.net"
+
+			dnsConfigOrig := tailcfg.DNSConfig{
+				Routes:  make(map[string][]*dnstype.Resolver),
+				Domains: []string{baseDomain},
+				Proxied: tt.magicDNS,
+			}
+
+			nodeInShared1 := mach("test_get_shared_nodes_1", "shared1", 1)
+
+			got := generateDNSConfig(
+				&types.Config{
+					TailcfgDNSConfig: &dnsConfigOrig,
+				},
+				nodeInShared1.View(),
+				nil,
+			)
+
+			if diff := cmp.Diff(tt.want, got, cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("expandAlias() unexpected result (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestNextDNSCapMapRendering(t *testing.T) {
+	t.Parallel()
+
+	mkConfig := func(addrs ...string) *types.Config {
+		resolvers := make([]*dnstype.Resolver, len(addrs))
+		for i, a := range addrs {
+			resolvers[i] = &dnstype.Resolver{Addr: a}
+		}
+
+		return &types.Config{
+			TailcfgDNSConfig: &tailcfg.DNSConfig{
+				Resolvers: resolvers,
+			},
+		}
+	}
+
+	mkNode := func() types.NodeView {
+		return (&types.Node{
+			ID:       1,
+			Hostname: "node1",
+			IPv4:     iap("100.64.0.1"),
+			Hostinfo: &tailcfg.Hostinfo{OS: "linux"},
+		}).View()
+	}
+
+	// resolverAddr extracts the first resolver's address with a
+	// bounds check. Without it, a regression that drops the
+	// resolver list would nil-panic instead of failing cleanly.
+	resolverAddr := func(t *testing.T, got *tailcfg.DNSConfig) string {
+		t.Helper()
+
+		if got == nil {
+			t.Fatalf("generateDNSConfig returned nil")
+		}
+
+		if len(got.Resolvers) == 0 {
+			t.Fatalf("generateDNSConfig returned no Resolvers")
+		}
+
+		return got.Resolvers[0].Addr
+	}
+
+	t.Run("no_capmap_metadata_appended", func(t *testing.T) {
+		t.Parallel()
+
+		got := generateDNSConfig(
+			mkConfig("https://dns.nextdns.io/abc"),
+			mkNode(),
+			nil,
+		)
+
+		want := "https://dns.nextdns.io/abc?device_ip=100.64.0.1&device_model=linux&device_name=node1"
+		if addr := resolverAddr(t, got); addr != want {
+			t.Errorf("addr = %q, want %q", addr, want)
+		}
+	})
+
+	t.Run("profile_overrides_global", func(t *testing.T) {
+		t.Parallel()
+
+		capMap := tailcfg.NodeCapMap{
+			"nextdns:override": []tailcfg.RawMessage{},
+		}
+
+		got := generateDNSConfig(
+			mkConfig("https://dns.nextdns.io/global"),
+			mkNode(),
+			capMap,
+		)
+
+		want := "https://dns.nextdns.io/override?device_ip=100.64.0.1&device_model=linux&device_name=node1"
+		if addr := resolverAddr(t, got); addr != want {
+			t.Errorf("addr = %q, want %q", addr, want)
+		}
+	})
+
+	t.Run("no_device_info_skips_metadata", func(t *testing.T) {
+		t.Parallel()
+
+		capMap := tailcfg.NodeCapMap{
+			"nextdns:abc":            []tailcfg.RawMessage{},
+			"nextdns:no-device-info": []tailcfg.RawMessage{},
+		}
+
+		got := generateDNSConfig(
+			mkConfig("https://dns.nextdns.io/global"),
+			mkNode(),
+			capMap,
+		)
+
+		want := "https://dns.nextdns.io/abc"
+		if addr := resolverAddr(t, got); addr != want {
+			t.Errorf("addr = %q, want %q", addr, want)
+		}
+	})
+
+	t.Run("non_nextdns_resolver_untouched", func(t *testing.T) {
+		t.Parallel()
+
+		capMap := tailcfg.NodeCapMap{
+			"nextdns:abc": []tailcfg.RawMessage{},
+		}
+
+		got := generateDNSConfig(
+			mkConfig("https://dns.example.org/dns-query"),
+			mkNode(),
+			capMap,
+		)
+
+		want := "https://dns.example.org/dns-query"
+		if addr := resolverAddr(t, got); addr != want {
+			t.Errorf("non-nextdns resolver was rewritten: %q", addr)
+		}
+	})
+}
+
+// TestBuildFromChangeFiltersPeerPatchesByVisibility proves that incremental
+// peer-change patches (online/offline, endpoint, key-expiry) are restricted to
+// the recipient's ACL-visible peer set, the same NodeStore peer map
+// buildTailPeers is fed from. Without it, a node receives the
+// existence, presence, and addresses of peers its policy forbids accessing.
+func TestBuildFromChangeFiltersPeerPatchesByVisibility(t *testing.T) {
+	tmp := t.TempDir()
+
+	p4 := netip.MustParsePrefix("100.64.0.0/10")
+	p6 := netip.MustParsePrefix("fd7a:115c:a1e0::/48")
+
+	cfg := &types.Config{
+		Database: types.DatabaseConfig{
+			Type:   types.DatabaseSqlite,
+			Sqlite: types.SqliteConfig{Path: tmp + "/h.db"},
+		},
+		PrefixV4:     &p4,
+		PrefixV6:     &p6,
+		IPAllocation: types.IPAllocationStrategySequential,
+		BaseDomain:   "headscale.test",
+		Policy:       types.PolicyConfig{Mode: types.PolicyModeDB},
+		DERP: types.DERPConfig{
+			DERPMap: &tailcfg.DERPMap{
+				Regions: map[tailcfg.DERPRegionID]*tailcfg.DERPRegion{999: {RegionID: 999}},
+			},
+		},
+		Tuning: types.Tuning{
+			NodeStoreBatchSize:    state.TestBatchSize,
+			NodeStoreBatchTimeout: state.TestBatchTimeout,
+		},
+	}
+
+	database, err := db.NewHeadscaleDatabase(cfg)
+	require.NoError(t, err)
+
+	user1 := database.CreateUserForTest("u1")
+	user2 := database.CreateUserForTest("u2")
+	n1 := database.CreateRegisteredNodeForTest(user1, "n1")
+	n1b := database.CreateRegisteredNodeForTest(user1, "n1b")
+	n2 := database.CreateRegisteredNodeForTest(user2, "n2")
+	require.NoError(t, database.Close())
+
+	s, err := state.NewState(cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Each user may reach only its own devices, so n1 cannot access n2.
+	policy := `{"acls":[
+		{"action":"accept","src":["u1@"],"dst":["u1@:*"]},
+		{"action":"accept","src":["u2@"],"dst":["u2@:*"]}
+	]}`
+	_, err = s.SetPolicy([]byte(policy))
+	require.NoError(t, err)
+
+	m := &mapper{state: s, cfg: cfg}
+
+	// n2 (user2) comes online; n1 (user1) must NOT receive its patch.
+	leakChange := change.NodeOnline(n2.ID)
+	resp, err := m.buildFromChange(n1.ID, tailcfg.CurrentCapabilityVersion, &leakChange)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+
+	for _, p := range resp.PeersChangedPatch {
+		assert.NotEqual(t, n2.ID.NodeID(), p.NodeID,
+			"n1 must not receive an online patch for n2, which its policy forbids accessing")
+	}
+
+	// Control: n1b (same user) coming online IS visible to n1.
+	okChange := change.NodeOnline(n1b.ID)
+	resp2, err := m.buildFromChange(n1.ID, tailcfg.CurrentCapabilityVersion, &okChange)
+	require.NoError(t, err)
+	require.NotNil(t, resp2)
+
+	var gotVisible bool
+
+	for _, p := range resp2.PeersChangedPatch {
+		if p.NodeID == n1b.ID.NodeID() {
+			gotVisible = true
+		}
+	}
+
+	assert.True(t, gotVisible,
+		"n1 must receive the online patch for visible same-user peer n1b")
+}
+
+// TestBuildFromChangeFiltersUserProfilesByVisibility proves the incremental
+// PeersChanged path restricts UserProfiles to the recipient's ACL-visible
+// peers, like the full-map path (whose ListPeers returns the
+// BuildPeerMap-filtered set). Without it, a changed node broadcast to all
+// nodes leaks its owner's identity (login name, display name, avatar) to
+// recipients whose policy forbids accessing that node.
+func TestBuildFromChangeFiltersUserProfilesByVisibility(t *testing.T) {
+	tmp := t.TempDir()
+
+	p4 := netip.MustParsePrefix("100.64.0.0/10")
+	p6 := netip.MustParsePrefix("fd7a:115c:a1e0::/48")
+
+	cfg := &types.Config{
+		Database: types.DatabaseConfig{
+			Type:   types.DatabaseSqlite,
+			Sqlite: types.SqliteConfig{Path: tmp + "/h.db"},
+		},
+		PrefixV4:     &p4,
+		PrefixV6:     &p6,
+		IPAllocation: types.IPAllocationStrategySequential,
+		BaseDomain:   "headscale.test",
+		Policy:       types.PolicyConfig{Mode: types.PolicyModeDB},
+		DERP: types.DERPConfig{
+			DERPMap: &tailcfg.DERPMap{
+				Regions: map[tailcfg.DERPRegionID]*tailcfg.DERPRegion{999: {RegionID: 999}},
+			},
+		},
+		Tuning: types.Tuning{
+			NodeStoreBatchSize:    state.TestBatchSize,
+			NodeStoreBatchTimeout: state.TestBatchTimeout,
+		},
+	}
+
+	database, err := db.NewHeadscaleDatabase(cfg)
+	require.NoError(t, err)
+
+	user1 := database.CreateUserForTest("u1")
+	user2 := database.CreateUserForTest("u2")
+	n1 := database.CreateRegisteredNodeForTest(user1, "n1")
+	n2 := database.CreateRegisteredNodeForTest(user2, "n2")
+	require.NoError(t, database.Close())
+
+	s, err := state.NewState(cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Each user may reach only its own devices, so n1 cannot access n2.
+	policy := `{"acls":[
+		{"action":"accept","src":["u1@"],"dst":["u1@:*"]},
+		{"action":"accept","src":["u2@"],"dst":["u2@:*"]}
+	]}`
+	_, err = s.SetPolicy([]byte(policy))
+	require.NoError(t, err)
+
+	m := &mapper{state: s, cfg: cfg}
+
+	// n2 (user2) is added and broadcast. n1 (user1) cannot access it, so n1
+	// must NOT receive user2's profile.
+	c := change.NodeAdded(n2.ID)
+	resp, err := m.buildFromChange(n1.ID, tailcfg.CurrentCapabilityVersion, &c)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+
+	for _, up := range resp.UserProfiles {
+		assert.NotEqual(t, user2.TapperVPNUserProfile().ID, up.ID,
+			"n1 must not receive user2's profile; n2 is not ACL-visible to n1")
+	}
+}
+
+// TestBuildFromChangeVisibilityMatchesFullMap is the consolidation guard for
+// PR #3304: the incremental change paths (peer patches via NodeOnline, changed
+// peers via NodeAdded) must expose exactly the same ACL-visible peer set as the
+// full-map path under every policy shape, and a cross-user UserProfile must not
+// leak. If a future refactor lets one path drift from another, this fails.
+//
+// It pins two behaviours of the snapshot peer map every path reads: deny-all
+// (empty matchers) must hide every peer on the incremental path rather than
+// fall open to "no matchers => all visible", and per-node policies
+// (autogroup:self) must agree across paths.
+func TestBuildFromChangeVisibilityMatchesFullMap(t *testing.T) {
+	tmp := t.TempDir()
+	p4 := netip.MustParsePrefix("100.64.0.0/10")
+	p6 := netip.MustParsePrefix("fd7a:115c:a1e0::/48")
+	cfg := &types.Config{
+		Database: types.DatabaseConfig{
+			Type:   types.DatabaseSqlite,
+			Sqlite: types.SqliteConfig{Path: tmp + "/h.db"},
+		},
+		PrefixV4:     &p4,
+		PrefixV6:     &p6,
+		IPAllocation: types.IPAllocationStrategySequential,
+		BaseDomain:   "headscale.test",
+		Policy:       types.PolicyConfig{Mode: types.PolicyModeDB},
+		DERP: types.DERPConfig{
+			DERPMap: &tailcfg.DERPMap{
+				Regions: map[tailcfg.DERPRegionID]*tailcfg.DERPRegion{999: {RegionID: 999}},
+			},
+		},
+		Tuning: types.Tuning{
+			NodeStoreBatchSize:    state.TestBatchSize,
+			NodeStoreBatchTimeout: state.TestBatchTimeout,
+		},
+	}
+
+	database, err := db.NewHeadscaleDatabase(cfg)
+	require.NoError(t, err)
+
+	user1 := database.CreateUserForTest("u1")
+	user2 := database.CreateUserForTest("u2")
+	n1 := database.CreateRegisteredNodeForTest(user1, "n1")
+	n1b := database.CreateRegisteredNodeForTest(user1, "n1b")
+	n2 := database.CreateRegisteredNodeForTest(user2, "n2")
+	require.NoError(t, database.Close())
+
+	s, err := state.NewState(cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	m := &mapper{state: s, cfg: cfg}
+	capVer := tailcfg.CurrentCapabilityVersion
+
+	// fullVisible returns the peer IDs n1 sees in the full map.
+	fullVisible := func(t *testing.T) map[tailcfg.NodeID]bool {
+		t.Helper()
+
+		resp, err := m.fullMapResponse(n1.ID, capVer)
+		require.NoError(t, err)
+
+		got := map[tailcfg.NodeID]bool{}
+		for _, p := range resp.Peers {
+			got[p.ID] = true
+		}
+
+		return got
+	}
+	// patchReaches reports whether a NodeOnline patch for id is delivered to n1.
+	patchReaches := func(t *testing.T, id types.NodeID) bool {
+		t.Helper()
+
+		c := change.NodeOnline(id)
+		resp, err := m.buildFromChange(n1.ID, capVer, &c)
+		require.NoError(t, err)
+
+		if resp == nil {
+			return false
+		}
+
+		for _, p := range resp.PeersChangedPatch {
+			if p.NodeID == id.NodeID() {
+				return true
+			}
+		}
+
+		return false
+	}
+	// changedReaches reports whether a NodeAdded changed-peer for id reaches n1.
+	changedReaches := func(t *testing.T, id types.NodeID) bool {
+		t.Helper()
+
+		c := change.NodeAdded(id)
+		resp, err := m.buildFromChange(n1.ID, capVer, &c)
+		require.NoError(t, err)
+
+		if resp == nil {
+			return false
+		}
+
+		for _, p := range resp.PeersChanged {
+			if p.ID == id.NodeID() {
+				return true
+			}
+		}
+
+		return false
+	}
+	// profileReaches reports whether want's profile is delivered to n1 when n
+	// is added. Use a cross-user node so the result is not masked by n1's own
+	// always-present user profile.
+	profileReaches := func(t *testing.T, n *types.Node, want tailcfg.UserID) bool {
+		t.Helper()
+
+		c := change.NodeAdded(n.ID)
+		resp, err := m.buildFromChange(n1.ID, capVer, &c)
+		require.NoError(t, err)
+
+		if resp == nil {
+			return false
+		}
+
+		for _, up := range resp.UserProfiles {
+			if up.ID == want {
+				return true
+			}
+		}
+
+		return false
+	}
+
+	// wantFull pins the actual peer-visibility semantics so the cross-path
+	// check below cannot pass vacuously (e.g. if every path broke to zero
+	// identically).
+	// Note deny_all: an empty ACL set yields no peer adjacency, so nothing is
+	// visible on any path. user_isolation and autogroup_self remain the
+	// discriminating cases that prove filtering works.
+	tests := []struct {
+		name     string
+		policy   string
+		wantFull int
+	}{
+		{"allow_all", `{"acls":[{"action":"accept","src":["*"],"dst":["*:*"]}]}`, 2},
+		{
+			"user_isolation",
+			`{"acls":[
+				{"action":"accept","src":["u1@"],"dst":["u1@:*"]},
+				{"action":"accept","src":["u2@"],"dst":["u2@:*"]}
+			]}`,
+			1,
+		},
+		{"deny_all", `{"acls":[]}`, 0},
+		{
+			"autogroup_self",
+			`{"acls":[{"action":"accept","src":["autogroup:member"],"dst":["autogroup:self:*"]}]}`,
+			1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := s.SetPolicy([]byte(tt.policy))
+			require.NoError(t, err)
+
+			full := fullVisible(t)
+			require.Lenf(t, full, tt.wantFull,
+				"%s: unexpected full-map visible peer count", tt.name)
+
+			for _, peer := range []*types.Node{n1b, n2} {
+				want := full[peer.ID.NodeID()]
+				assert.Equalf(t, want, patchReaches(t, peer.ID),
+					"%s: NodeOnline patch for %s must reach n1 iff full-map shows it",
+					tt.name, peer.Hostname)
+				assert.Equalf(t, want, changedReaches(t, peer.ID),
+					"%s: NodeAdded changed-peer for %s must reach n1 iff full-map shows it",
+					tt.name, peer.Hostname)
+			}
+			// Cross-user profile (user2) must appear iff n2 is visible to n1.
+			assert.Equalf(t, full[n2.ID.NodeID()], profileReaches(t, n2, user2.TapperVPNUserProfile().ID),
+				"%s: user2 profile must be sent iff n2 is visible to n1", tt.name)
+		})
+	}
+}
+
+// TestFullMapResponseSurvivesPeerWithInvalidName proves a single node with an
+// FQDN-invalid GivenName must not break map generation for its peers.
+//
+// A node whose stored GivenName is empty (ErrNodeHasNoGivenName) or yields an
+// FQDN longer than MaxHostnameLength (ErrHostnameTooLong) makes GetFQDN, and
+// therefore TailNode, return an error. buildTailPeers used to abort the entire
+// peer list on the first such error, so MapResponseBuilder.Build() failed for
+// every node that could see the bad peer; on the initial-connection path that
+// surfaced as "PollNetMap: ... unexpected EOF" and the "Unable to connect to
+// the TapperVPN coordination server" health warning. A legacy DB row loads
+// verbatim (NewNodeStore reads db.ListNodes() without re-sanitising names), so
+// the bad peer persists across restart. The build for an unaffected viewer
+// must succeed: the bad peer is dropped, valid peers and self survive.
+func TestFullMapResponseSurvivesPeerWithInvalidName(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		badName string
+	}{
+		{"empty given name", ""},
+		{"over-long fqdn", strings.Repeat("a", types.MaxHostnameLength+1)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			p4 := netip.MustParsePrefix("100.64.0.0/10")
+			p6 := netip.MustParsePrefix("fd7a:115c:a1e0::/48")
+			cfg := &types.Config{
+				Database: types.DatabaseConfig{
+					Type:   types.DatabaseSqlite,
+					Sqlite: types.SqliteConfig{Path: tmp + "/h.db"},
+				},
+				PrefixV4:     &p4,
+				PrefixV6:     &p6,
+				IPAllocation: types.IPAllocationStrategySequential,
+				BaseDomain:   "headscale.test",
+				Policy:       types.PolicyConfig{Mode: types.PolicyModeDB},
+				DERP: types.DERPConfig{
+					DERPMap: &tailcfg.DERPMap{
+						Regions: map[tailcfg.DERPRegionID]*tailcfg.DERPRegion{999: {RegionID: 999}},
+					},
+				},
+				Tuning: types.Tuning{
+					NodeStoreBatchSize:    state.TestBatchSize,
+					NodeStoreBatchTimeout: state.TestBatchTimeout,
+				},
+			}
+
+			database, err := db.NewHeadscaleDatabase(cfg)
+			require.NoError(t, err)
+
+			user := database.CreateUserForTest("u1")
+			n1 := database.CreateRegisteredNodeForTest(user, "n1")     // viewer, valid
+			bad := database.CreateRegisteredNodeForTest(user, "bad")   // peer, name corrupted below
+			good := database.CreateRegisteredNodeForTest(user, "good") // peer, valid control
+
+			// Simulate a legacy/corrupt row that v29 loads verbatim.
+			require.NoError(t, database.DB.
+				Model(&types.Node{}).
+				Where("id = ?", bad.ID).
+				Update("given_name", tt.badName).Error)
+			require.NoError(t, database.Close())
+
+			s, err := state.NewState(cfg)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = s.Close() })
+
+			// Allow-all so n1 sees both peers; the bad one must still be dropped.
+			_, err = s.SetPolicy([]byte(`{"acls":[{"action":"accept","src":["*"],"dst":["*:*"]}]}`))
+			require.NoError(t, err)
+
+			m := &mapper{state: s, cfg: cfg}
+			capVer := tailcfg.CurrentCapabilityVersion
+
+			resp, err := m.fullMapResponse(n1.ID, capVer)
+			require.NoError(t, err, "n1's map must build despite a peer with an invalid name")
+			require.NotNil(t, resp)
+			require.NotNil(t, resp.Node, "n1 must receive its own self node")
+
+			peers := map[tailcfg.NodeID]bool{}
+			for _, p := range resp.Peers {
+				peers[p.ID] = true
+			}
+
+			assert.False(t, peers[bad.ID.NodeID()], "the peer with an invalid name must be dropped")
+			assert.True(t, peers[good.ID.NodeID()], "valid peers must remain in the map")
+		})
+	}
+}
+
+// TestGenerateDNSConfigNilHostinfoNoPanic proves generateDNSConfig does not
+// panic when a node's Hostinfo is nil (e.g. a legacy DB row with a NULL
+// host_info column). addNextDNSMetadata dereferenced node.Hostinfo().OS()
+// without the .Valid() guard its siblings (RequestTags, TailNode) apply, so
+// building such a node's map crashed the server whenever a NextDNS resolver
+// was configured.
+func TestGenerateDNSConfigNilHostinfoNoPanic(t *testing.T) {
+	node := (&types.Node{
+		Hostname: "legacy-node",
+		IPv4:     iap("100.64.0.1"),
+		// Hostinfo intentionally nil, as a legacy NULL host_info row loads.
+	}).View()
+
+	cfg := &types.Config{
+		TailcfgDNSConfig: &tailcfg.DNSConfig{
+			Resolvers: []*dnstype.Resolver{{Addr: "https://dns.nextdns.io/abc"}},
+		},
+	}
+
+	require.NotPanics(t, func() {
+		generateDNSConfig(cfg, node, nil)
+	}, "generateDNSConfig must not panic when a node has nil Hostinfo")
+}
+
+// policyShapes covers the paths that decide which peers the mapper sends: a
+// global filter with matchers, a per-node (autogroup:self) filter, a policy
+// that leaves every node with zero matchers, and no rules at all. The
+// zero-matcher shape is the interesting one: it must hide every peer, not
+// fall open to "no matchers => all visible".
+var policyShapes = []struct {
+	name   string
+	policy string
+}{
+	{
+		name:   "allow all",
+		policy: `{"acls":[{"action":"accept","src":["*"],"dst":["*:*"]}]}`,
+	},
+	{
+		name:   "autogroup self",
+		policy: `{"acls":[{"action":"accept","src":["autogroup:member"],"dst":["autogroup:self:*"]}]}`,
+	},
+	{
+		name:   "no rules",
+		policy: `{"acls":[]}`,
+	},
+	{
+		name:   "empty policy",
+		policy: `{}`,
+	},
+}
+
+// assertSelfNotAPeer fails when a [tailcfg.MapResponse] addressed to nodeID
+// mentions nodeID in any peer-carrying field.
+//
+// The TapperVPN client merges [tailcfg.MapResponse.PeersChanged] straight into
+// its peer map (controlclient updatePeersStateFromResponse) and keeps the self
+// node in a separate field, so a node present in its own peer list is rendered
+// twice by clients that concatenate peers with self.
+func assertSelfNotAPeer(t *testing.T, nodeID types.NodeID, resp *tailcfg.MapResponse, what string) {
+	t.Helper()
+
+	if resp == nil {
+		return
+	}
+
+	self := nodeID.NodeID()
+
+	for _, p := range resp.Peers {
+		assert.NotEqualf(t, self, p.ID, "%s: node %d listed in its own Peers", what, nodeID)
+	}
+
+	for _, p := range resp.PeersChanged {
+		assert.NotEqualf(t, self, p.ID, "%s: node %d listed in its own PeersChanged", what, nodeID)
+	}
+
+	for _, p := range resp.PeersChangedPatch {
+		assert.NotEqualf(t, self, p.NodeID, "%s: node %d patched in its own PeersChangedPatch", what, nodeID)
+	}
+
+	for _, id := range resp.PeersRemoved {
+		assert.NotEqualf(t, self, id, "%s: node %d listed in its own PeersRemoved", what, nodeID)
+	}
+}
+
+// TestMapResponseNeverContainsSelfAsPeer drives the [change.Change] shapes the
+// server emits through the response builder for every node, under each policy
+// shape, and asserts the recipient is never present in its own peer fields.
+func TestMapResponseNeverContainsSelfAsPeer(t *testing.T) {
+	for _, tt := range policyShapes {
+		t.Run(tt.name, func(t *testing.T) {
+			testData, cleanup := setupBatcherWithTestData(t, NewBatcherAndMapper, 2, 3, largeBufferSize)
+			defer cleanup()
+
+			_, err := testData.State.SetPolicy([]byte(tt.policy))
+			require.NoError(t, err)
+
+			batcher := unwrapBatcher(testData.Batcher)
+
+			allIDs := make([]types.NodeID, 0, len(testData.Nodes))
+
+			for i := range testData.Nodes {
+				tn := &testData.Nodes[i]
+				require.NoError(t, testData.Batcher.AddNode(tn.n.ID, tn.ch, 100, nil))
+				allIDs = append(allIDs, tn.n.ID)
+			}
+
+			for _, recipient := range allIDs {
+				changes := map[string]change.Change{
+					"full self":     change.FullSelf(recipient),
+					"full update":   change.FullUpdate(),
+					"policy change": change.PolicyChange(),
+					"self added":    change.NodeAdded(recipient),
+					"self online":   change.NodeOnline(recipient),
+					"self offline":  change.NodeOffline(recipient),
+					// A batch naming every node, the recipient included.
+					// change.PeersChanged carries no OriginNode, so the
+					// self-update short circuit in buildFromChange never fires
+					// and the peer lookup is the only thing left to drop self.
+					"all peers changed": change.PeersChanged("all peers", allIDs...),
+				}
+
+				for name, ch := range changes {
+					resp, err := batcher.MapResponseFromChange(recipient, ch)
+					require.NoError(t, err, "%s for node %d", name, recipient)
+					assertSelfNotAPeer(t, recipient, resp, name)
+				}
+			}
+		})
+	}
+}
+
+// TestNoSelfAsPeerDuringRealNodeChurn exercises the change flow poll.go drives
+// (connect, disconnect, reconnect, policy reload, key expiry) and scans every
+// delivered [tailcfg.MapResponse] for the recipient's own node.
+func TestNoSelfAsPeerDuringRealNodeChurn(t *testing.T) {
+	// How long a node's stream must stay silent before the churn counts as
+	// settled and the scan moves on to the next node.
+	const quietPeriod = 500 * time.Millisecond
+
+	for _, tt := range policyShapes {
+		t.Run(tt.name, func(t *testing.T) {
+			testData, cleanup := setupBatcherWithTestData(t, NewBatcherAndMapper, 2, 3, largeBufferSize)
+			defer cleanup()
+
+			_, err := testData.State.SetPolicy([]byte(tt.policy))
+			require.NoError(t, err)
+
+			batcher := testData.Batcher
+
+			for i := range testData.Nodes {
+				tn := &testData.Nodes[i]
+				require.NoError(t, batcher.AddNode(tn.n.ID, tn.ch, 100, nil))
+			}
+
+			// Drop and re-add every node but the first, then reload the
+			// policy and expire the one node that never reconnected.
+			for i := 1; i < len(testData.Nodes); i++ {
+				tn := &testData.Nodes[i]
+				batcher.RemoveNode(tn.n.ID, tn.ch)
+				require.NoError(t, batcher.AddNode(tn.n.ID, tn.ch, 100, nil))
+			}
+
+			_, err = testData.State.SetPolicy([]byte(tt.policy))
+			require.NoError(t, err)
+
+			expiry := time.Now().Add(time.Hour)
+
+			_, c, err := testData.State.SetNodeExpiry(testData.Nodes[0].n.ID, &expiry)
+			require.NoError(t, err)
+			batcher.AddWork(c)
+
+			for i := range testData.Nodes {
+				tn := &testData.Nodes[i]
+
+				for quiet := false; !quiet; {
+					select {
+					case resp := <-tn.ch:
+						assertSelfNotAPeer(t, tn.n.ID, resp, "churn")
+					case <-time.After(quietPeriod):
+						quiet = true
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestBackfillNodeIPsReachesBackfilledNode proves the node that receives a
+// backfilled address learns it too. Peers pick it up from the policy
+// refresh, but that refresh carries no self node, so the node itself kept
+// serving its old addresses until an unrelated self update.
+func TestBackfillNodeIPsReachesBackfilledNode(t *testing.T) {
+	tmp := t.TempDir()
+	p4 := netip.MustParsePrefix("100.64.0.0/10")
+	p6 := netip.MustParsePrefix("fd7a:115c:a1e0::/48")
+	cfg := &types.Config{
+		Database: types.DatabaseConfig{
+			Type:   types.DatabaseSqlite,
+			Sqlite: types.SqliteConfig{Path: tmp + "/h.db"},
+		},
+		PrefixV4:     &p4,
+		PrefixV6:     &p6,
+		IPAllocation: types.IPAllocationStrategySequential,
+		BaseDomain:   "headscale.test",
+		Policy:       types.PolicyConfig{Mode: types.PolicyModeDB},
+		DERP: types.DERPConfig{
+			DERPMap: &tailcfg.DERPMap{
+				Regions: map[tailcfg.DERPRegionID]*tailcfg.DERPRegion{999: {RegionID: 999}},
+			},
+		},
+		Tuning: types.Tuning{
+			NodeStoreBatchSize:    state.TestBatchSize,
+			NodeStoreBatchTimeout: state.TestBatchTimeout,
+		},
+	}
+
+	database, err := db.NewHeadscaleDatabase(cfg)
+	require.NoError(t, err)
+
+	user := database.CreateUserForTest("u1")
+	nodes := database.CreateRegisteredNodesForTest(user, 2, "bf")
+	target := nodes[0].ID
+	require.NoError(t, database.DB.Model(&types.Node{}).Where("id = ?", target).Update("ipv6", nil).Error)
+	// Backfill copies the stored Hostinfo, which a registered client always has.
+	require.NoError(t, database.DB.Model(&types.Node{}).Where("1 = 1").Update("host_info", "{}").Error)
+	require.NoError(t, database.Close())
+
+	s, err := state.NewState(cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	backfilled, cs, err := s.BackfillNodeIPs()
+	require.NoError(t, err)
+	require.NotEmpty(t, backfilled)
+
+	stored, ok := s.GetNodeByID(target)
+	require.True(t, ok)
+	require.True(t, stored.IPv6().Valid(), "backfill must assign an IPv6 address")
+
+	m := &mapper{state: s, cfg: cfg}
+	nc := newMockNodeConnection(target)
+
+	var self *tailcfg.Node
+
+	for _, ch := range change.FilterForNode(target, cs) {
+		resps, err := generateMapResponse(nc, m, ch)
+		require.NoError(t, err)
+
+		for _, resp := range resps {
+			if resp.Node != nil {
+				self = resp.Node
+			}
+		}
+	}
+
+	require.NotNil(t, self, "the backfilled node must receive its own node")
+	assert.Contains(t, self.Addresses, netip.PrefixFrom(stored.IPv6().Get(), 128))
+}
+
+var errInjectedExpiry = errors.New("injected expiry failure")
+
+// TestFailedExpiryOfPrimaryAnnouncesBackup expires the primary of an HA
+// route while the database write fails. The NodeStore already moved the
+// route to the backup, so the change returned with the error must still
+// tell a client about the new primary, as the successful path does;
+// otherwise the client drops the old primary's route with no replacement.
+func TestFailedExpiryOfPrimaryAnnouncesBackup(t *testing.T) {
+	tmp := t.TempDir()
+	p4 := netip.MustParsePrefix("100.64.0.0/10")
+	p6 := netip.MustParsePrefix("fd7a:115c:a1e0::/48")
+	cfg := &types.Config{
+		Database: types.DatabaseConfig{
+			Type:   types.DatabaseSqlite,
+			Sqlite: types.SqliteConfig{Path: tmp + "/h.db"},
+		},
+		PrefixV4:     &p4,
+		PrefixV6:     &p6,
+		IPAllocation: types.IPAllocationStrategySequential,
+		BaseDomain:   "headscale.test",
+		Policy:       types.PolicyConfig{Mode: types.PolicyModeDB},
+		DERP: types.DERPConfig{
+			DERPMap: &tailcfg.DERPMap{
+				Regions: map[tailcfg.DERPRegionID]*tailcfg.DERPRegion{999: {RegionID: 999}},
+			},
+		},
+		Tuning: types.Tuning{
+			NodeStoreBatchSize:    state.TestBatchSize,
+			NodeStoreBatchTimeout: state.TestBatchTimeout,
+		},
+	}
+
+	route := netip.MustParsePrefix("10.77.0.0/24")
+
+	database, err := db.NewHeadscaleDatabase(cfg)
+	require.NoError(t, err)
+
+	user := database.CreateUserForTest("u1")
+	nodes := database.CreateRegisteredNodesForTest(user, 3, "ha")
+
+	for _, n := range nodes[:2] {
+		n.Hostinfo = &tailcfg.Hostinfo{RoutableIPs: []netip.Prefix{route}}
+		n.ApprovedRoutes = []netip.Prefix{route}
+		require.NoError(t, database.DB.Save(n).Error)
+	}
+
+	require.NoError(t, database.Close())
+
+	s, err := state.NewState(cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	primary, backup, client := nodes[0].ID, nodes[1].ID, nodes[2].ID
+	for _, id := range []types.NodeID{primary, backup, client} {
+		s.Connect(id)
+	}
+
+	require.Equal(t, []netip.Prefix{route}, s.GetNodePrimaryRoutes(primary))
+
+	require.NoError(t, s.DB().DB.Callback().Update().Before("gorm:update").
+		Register("fail_node_update", func(tx *gorm.DB) {
+			if tx.Statement.Table == "nodes" {
+				_ = tx.AddError(errInjectedExpiry)
+			}
+		}))
+	t.Cleanup(func() { _ = s.DB().DB.Callback().Update().Remove("fail_node_update") })
+
+	past := time.Now().Add(-time.Hour)
+	_, c, err := s.SetNodeExpiry(primary, &past)
+	require.ErrorIs(t, err, errInjectedExpiry)
+	require.Equal(t, []netip.Prefix{route}, s.GetNodePrimaryRoutes(backup),
+		"the NodeStore moved the route to the backup")
+
+	m := &mapper{state: s, cfg: cfg}
+	nc := newMockNodeConnection(client)
+
+	var backupRoutes []netip.Prefix
+
+	for _, ch := range change.FilterForNode(client, []change.Change{c}) {
+		resps, err := generateMapResponse(nc, m, ch)
+		require.NoError(t, err)
+
+		for _, resp := range resps {
+			for _, p := range append(resp.Peers, resp.PeersChanged...) {
+				if p.ID == backup.NodeID() {
+					backupRoutes = p.PrimaryRoutes
+				}
+			}
+		}
+	}
+
+	assert.Contains(t, backupRoutes, route, "the client must learn the backup is primary: %s", c.Type())
+}
+
+// TestGenerateMapResponseDebugOnlyOnFullMaps pins where [tailcfg.Debug] rides:
+// on every full map (the initial map and FullUpdate renders), so a client that
+// connects or reconnects is told to stop log uploads, and on nothing else. The
+// renders run through [generateMapResponse], the path the batcher uses, so a
+// branch that bypasses buildFromChange cannot silently drop or add it.
+func TestGenerateMapResponseDebugOnlyOnFullMaps(t *testing.T) {
+	tmp := t.TempDir()
+	p4 := netip.MustParsePrefix("100.64.0.0/10")
+	p6 := netip.MustParsePrefix("fd7a:115c:a1e0::/48")
+	cfg := &types.Config{
+		Database: types.DatabaseConfig{
+			Type:   types.DatabaseSqlite,
+			Sqlite: types.SqliteConfig{Path: tmp + "/h.db"},
+		},
+		PrefixV4:     &p4,
+		PrefixV6:     &p6,
+		IPAllocation: types.IPAllocationStrategySequential,
+		BaseDomain:   "headscale.test",
+		Policy:       types.PolicyConfig{Mode: types.PolicyModeDB},
+		DERP: types.DERPConfig{
+			DERPMap: &tailcfg.DERPMap{
+				Regions: map[tailcfg.DERPRegionID]*tailcfg.DERPRegion{999: {RegionID: 999}},
+			},
+		},
+		Tuning: types.Tuning{
+			NodeStoreBatchSize:    state.TestBatchSize,
+			NodeStoreBatchTimeout: state.TestBatchTimeout,
+		},
+	}
+
+	database, err := db.NewHeadscaleDatabase(cfg)
+	require.NoError(t, err)
+
+	user := database.CreateUserForTest("u1")
+	n1 := database.CreateRegisteredNodeForTest(user, "n1")
+	n2 := database.CreateRegisteredNodeForTest(user, "n2")
+	require.NoError(t, database.Close())
+
+	s, err := state.NewState(cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	_, err = s.SetPolicy([]byte(`{"acls":[{"action":"accept","src":["*"],"dst":["*:*"]}]}`))
+	require.NoError(t, err)
+
+	m := &mapper{state: s, cfg: cfg}
+
+	kinds := []struct {
+		name string
+		c    change.Change
+		full bool
+	}{
+		{"full_update", change.FullUpdate(), true},
+		{"full_self", change.FullSelf(n1.ID), true},
+		{"user_removed", change.UserRemoved(), true},
+		{"self_update", change.SelfUpdate(n1.ID), false},
+		{"self_node_added", change.NodeAdded(n1.ID), false},
+		{"policy_change", change.PolicyChange(), false},
+		{"derp_map", change.DERPMap(), false},
+		{"dns_config", change.DNSConfig(), false},
+		{"peer_added", change.NodeAdded(n2.ID), false},
+		{"peer_online", change.NodeOnline(n2.ID), false},
+	}
+
+	for _, logTail := range []bool{false, true} {
+		for _, k := range kinds {
+			t.Run(fmt.Sprintf("logtail=%t/%s", logTail, k.name), func(t *testing.T) {
+				cfg.LogTail.Enabled = logTail
+
+				resps, err := generateMapResponse(newMockNodeConnection(n1.ID), m, k.c)
+				require.NoError(t, err)
+				require.Len(t, resps, 1)
+
+				var want *tailcfg.Debug
+				if k.full && !logTail {
+					want = &tailcfg.Debug{DisableLogTail: true}
+				}
+
+				assert.Equal(t, want, resps[0].Debug)
+			})
+		}
+	}
+}
+
+// TestCertDomains pins the name sent in DNSConfig.CertDomains: the
+// client only runs `tappervpn cert` for a name it finds there exactly,
+// compared against its own MagicDNS name without the trailing dot.
+func TestCertDomains(t *testing.T) {
+	enabled := types.DNSConfig{Certificates: types.CertificatesConfig{Enabled: true}}
+
+	acmeDNS, err := dns.NewProvider("acmedns", map[string]any{"config": map[string]any{
+		"laptop.ts.example.com": map[string]any{
+			"username":   "user",
+			"password":   "pass",
+			"subdomain":  "reg",
+			"server_url": "https://auth.acme-dns.io",
+		},
+	}}, func(string) (any, bool) { return nil, false })
+	require.NoError(t, err)
+
+	tests := []struct {
+		name       string
+		node       *types.Node
+		dns        types.DNSConfig
+		provider   dns.Provider
+		baseDomain string
+		want       []string
+	}{
+		{
+			name:     "own acme-dns registration",
+			node:     &types.Node{GivenName: "laptop"},
+			dns:      enabled,
+			provider: acmeDNS,
+			want:     []string{"laptop.ts.example.com"},
+		},
+		{
+			// Without a registration of its own, the node's challenge would
+			// be answered from a record another name's challenge shares.
+			name:     "no acme-dns registration of its own",
+			node:     &types.Node{GivenName: "desktop"},
+			dns:      enabled,
+			provider: acmeDNS,
+		},
+		{
+			name: "user owned",
+			node: &types.Node{GivenName: "laptop", UserID: new(uint(1))},
+			dns:  enabled,
+			want: []string{"laptop.ts.example.com"},
+		},
+		{
+			name: "tagged",
+			node: &types.Node{GivenName: "server", Tags: []string{"tag:server"}},
+			dns:  enabled,
+			want: []string{"server.ts.example.com"},
+		},
+		{
+			name: "disabled",
+			node: &types.Node{GivenName: "laptop"},
+		},
+		{
+			// The operator gave this name, in another case, to a service; a
+			// node naming itself grafana must not get a certificate for it.
+			name: "extra record name",
+			node: &types.Node{GivenName: "grafana"},
+			dns:  enabled,
+		},
+		{
+			// A wildcard order for *.svc shares its challenge record with
+			// svc, so svc must not get one covering grafana.svc.
+			name: "extra record below name",
+			node: &types.Node{GivenName: "svc"},
+			dns:  enabled,
+		},
+		{
+			name: "label suffix of extra record",
+			node: &types.Node{GivenName: "fana"},
+			dns:  enabled,
+			want: []string{"fana.ts.example.com"},
+		},
+		{
+			// Renames are lowercased now; an older mixed-case name could
+			// share its challenge record with another node's name.
+			name: "mixed case name",
+			node: &types.Node{GivenName: "Laptop"},
+			dns:  enabled,
+		},
+		{
+			name:       "challenge name too long",
+			node:       &types.Node{GivenName: strings.Repeat("a", 63)},
+			dns:        enabled,
+			baseDomain: strings.Repeat("b.", 87) + "example.com",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			baseDomain := tt.baseDomain
+			if baseDomain == "" {
+				baseDomain = "ts.example.com"
+			}
+
+			cfg := &types.Config{
+				BaseDomain:   baseDomain,
+				DNSConfig:    tt.dns,
+				DNSChallenge: types.DNSChallengeConfig{Provider: tt.provider},
+				TailcfgDNSConfig: &tailcfg.DNSConfig{
+					Proxied: true,
+					ExtraRecords: []tailcfg.DNSRecord{
+						{Name: "Grafana.ts.example.com", Type: "A", Value: "100.64.0.3"},
+						{Name: "grafana.svc.ts.example.com.", Type: "A", Value: "100.64.0.4"},
+					},
+				},
+			}
+
+			got := generateDNSConfig(cfg, tt.node.View(), nil)
+			assert.Equal(t, tt.want, got.CertDomains)
+			assert.Nil(t, cfg.TailcfgDNSConfig.CertDomains, "global DNS config must stay untouched")
+		})
+	}
+}

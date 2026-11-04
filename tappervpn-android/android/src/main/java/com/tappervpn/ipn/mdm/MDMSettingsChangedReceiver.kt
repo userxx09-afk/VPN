@@ -1,0 +1,28 @@
+// Copyright (c) Tailscale Inc & AUTHORS
+// SPDX-License-Identifier: BSD-3-Clause
+
+package com.tappervpn.ipn.mdm
+
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.RestrictionsManager
+import com.tappervpn.ipn.App
+import com.tappervpn.ipn.util.TSLog
+
+class MDMSettingsChangedReceiver : BroadcastReceiver() {
+  override fun onReceive(context: Context?, intent: Intent?) {
+    if (intent?.action == Intent.ACTION_APPLICATION_RESTRICTIONS_CHANGED) {
+      TSLog.d("syspolicy", "MDM settings changed")
+      val restrictionsManager =
+          context?.getSystemService(Context.RESTRICTIONS_SERVICE) as RestrictionsManager
+
+      MDMSettings.update(App.get(), restrictionsManager)
+
+      // MDM state may have flipped the effective client-logging value
+      // (getIsClientLoggingEnabled forces true under MDM); push the
+      // current effective value so the backend toggles immediately.
+      App.get().getLibtappervpnApp().setClientLoggingEnabled(App.get().getIsClientLoggingEnabled())
+    }
+  }
+}

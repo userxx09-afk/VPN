@@ -1,0 +1,66 @@
+#!/bin/sh
+# Installs the newest TapperVPN release from GitHub if it is newer than the
+# installed package. Run daily by cron when auto_update is on (see
+# /etc/init.d/tappervpn); run by hand with `check` to only report.
+#
+# Trust: SHA256SUMS must carry a valid usign signature from the key in
+# /usr/share/tappervpn/release.pub, and the package must match its line.
+
+REPO=userxx09-afk/VPN
+PUB=/usr/share/tappervpn/release.pub
+ARCH=$(cat /usr/share/tappervpn/arch 2>/dev/null)
+WORK=/tmp/tappervpn-update
+API=https://api.github.com/repos/$REPO/releases/latest
+
+log() { logger -t tappervpn-update "$*"; echo "$*"; }
+fail() { log "$*"; rm -rf "$WORK"; exit 1; }
+
+# newer A B: true if dotted version A is newer than B (ignores "-suffix").
+newer() {
+	a=${1%%-*}; b=${2%%-*}
+	while [ -n "$a$b" ]; do
+		x=${a%%.*}; y=${b%%.*}
+		[ "${x:-0}" -gt "${y:-0}" ] 2>/dev/null && return 0
+		[ "${x:-0}" -lt "${y:-0}" ] 2>/dev/null && return 1
+		[ "$a" = "${a#*.}" ] && a= || a=${a#*.}
+		[ "$b" = "${b#*.}" ] && b= || b=${b#*.}
+	done
+	return 1
+}
+
+fetch() { uclient-fetch -q -T 60 -O "$2" "$1"; }
+
+[ -n "$ARCH" ] || fail "unknown router CPU (/usr/share/tappervpn/arch missing)"
+command -v usign >/dev/null || fail "usign not found; can't verify updates, so not updating"
+
+rm -rf "$WORK"; mkdir -p "$WORK"
+fetch "$API" "$WORK/release.json" || fail "can't reach GitHub"
+latest=$(jsonfilter -i "$WORK/release.json" -e '@.tag_name'); latest=${latest#v}
+installed=$(opkg status tappervpn | sed -n 's/^Version: //p')
+[ -n "$latest" ] || fail "no releases published yet"
+
+if ! newer "$latest" "$installed"; then
+	log "up to date (installed $installed, latest $latest)"
+	rm -rf "$WORK"; exit 0
+fi
+log "update available: $installed -> $latest"
+[ "$1" = check ] && { rm -rf "$WORK"; exit 0; }
+
+asset_url() { jsonfilter -i "$WORK/release.json" -e "@.assets[@.name='$1'].browser_download_url"; }
+pkg=tappervpn-glinet-$ARCH.ipk
+for f in SHA256SUMS SHA256SUMS.sig $pkg; do
+	url=$(asset_url "$f")
+	[ -n "$url" ] || fail "release $latest has no $f"
+	fetch "$url" "$WORK/$f" || fail "download of $f failed"
+done
+
+usign -V -q -m "$WORK/SHA256SUMS" -x "$WORK/SHA256SUMS.sig" -p "$PUB" ||
+	fail "release $latest has a bad signature; not installing"
+want=$(awk -v f="$pkg" '$2 == f { print $1 }' "$WORK/SHA256SUMS")
+got=$(sha256sum "$WORK/$pkg" | cut -d' ' -f1)
+[ -n "$want" ] && [ "$want" = "$got" ] || fail "$pkg doesn't match SHA256SUMS; not installing"
+
+log "installing $latest"
+opkg install "$WORK/$pkg" >"$WORK/opkg.log" 2>&1 || fail "opkg failed: $(tail -n 3 "$WORK/opkg.log")"
+log "installed $latest"
+rm -rf "$WORK"

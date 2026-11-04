@@ -34,7 +34,7 @@ trusted_proxies: []
 # TS2021 Noise protocol
 noise:
   # The Noise private key is used to encrypt the traffic between headscale and
-  # Tailscale clients when using the new Noise-based protocol. A missing key
+  # TapperVPN clients when using the new Noise-based protocol. A missing key
   # will be automatically generated.
   private_key_path: data/noise_private.key
 
@@ -42,15 +42,15 @@ noise:
 # Each prefix consists of either an IPv4 or IPv6 address,
 # and the associated prefix length, delimited by a slash.
 #
-# WARNING: These prefixes MUST be subsets of the standard Tailscale ranges:
+# WARNING: These prefixes MUST be subsets of the standard TapperVPN ranges:
 #   - IPv4: 100.64.0.0/10 (CGNAT range)
-#   - IPv6: fd7a:115c:a1e0::/48 (Tailscale ULA range)
+#   - IPv6: fd7a:115c:a1e0::/48 (TapperVPN ULA range)
 #
 # Using a SUBSET of these ranges is supported and useful if you want to
 # limit IP allocation to a smaller block (e.g., 100.64.0.0/24).
 #
 # Using ranges OUTSIDE of CGNAT/ULA is NOT supported and will cause
-# undefined behaviour. The Tailscale client has hard-coded assumptions
+# undefined behaviour. The TapperVPN client has hard-coded assumptions
 # about these ranges and will break in subtle, hard-to-debug ways.
 #
 # See:
@@ -67,7 +67,7 @@ prefixes:
   # - random: assigns the next free IP from a pseudo-random IP generator (crypto/rand).
   allocation: sequential
 
-# DERP is a relay system that Tailscale uses when a direct
+# DERP is a relay system that TapperVPN uses when a direct
 # connection cannot be established.
 # https://tailscale.com/blog/how-tailscale-works/#encrypted-tcp-relays-derp
 #
@@ -83,7 +83,7 @@ derp:
     # the regular DERP config.
     region_id: 999
 
-    # Region code and name are displayed in the Tailscale UI to identify a DERP region
+    # Region code and name are displayed in the TapperVPN UI to identify a DERP region
     region_code: "headscale"
     region_name: "Headscale Embedded DERP"
 
@@ -97,7 +97,7 @@ derp:
     stun_listen_addr: "0.0.0.0:3478"
 
     # Private key used to encrypt the traffic between headscale DERP and
-    # Tailscale clients. A missing key will be automatically generated.
+    # TapperVPN clients. A missing key will be automatically generated.
     private_key_path: data/derp_server_private.key
 
     # This flag can be used, so the DERP map entry for the embedded DERP server is not written automatically,
@@ -115,7 +115,7 @@ derp:
     - https://controlplane.tailscale.com/derpmap/default
 
   # Locally available DERP map files. The extension picks the format: .yaml/.yml,
-  # or Tailscale JSON as .json or .hujson.
+  # or TapperVPN JSON as .json or .hujson.
   #
   # This option is mostly interesting for people hosting their own DERP servers:
   # https://tailscale.com/docs/reference/derp-servers/custom-derp-servers
@@ -147,7 +147,7 @@ node:
   # Setting the value to "0" means no default expiry (nodes never expire unless
   # explicitly expired via `headscale nodes expire`).
   #
-  # Tailscale SaaS uses 180d; set to a positive duration to match that behaviour.
+  # TapperVPN SaaS uses 180d; set to a positive duration to match that behaviour.
   #
   # Default: 0 (no default expiry)
   expiry: 0
@@ -270,7 +270,7 @@ log:
   format: text
 
 ## Policy
-# Headscale supports a wide range of Tailscale policy features such as ACLs and
+# Headscale supports a wide range of TapperVPN policy features such as ACLs and
 # Grants. Please have a look at their docs to better understand the concepts:
 # ACLs: https://tailscale.com/docs/features/access-control/acls
 # Grants: https://tailscale.com/docs/features/access-control/grants
@@ -284,7 +284,7 @@ policy:
 
 ## DNS
 #
-# headscale supports Tailscale's DNS configuration and MagicDNS.
+# headscale supports TapperVPN's DNS configuration and MagicDNS.
 # Please have a look to their docs to better understand the concepts:
 #
 # - https://tailscale.com/docs/features/magicdns
@@ -292,8 +292,8 @@ policy:
 #
 # Please note that for the DNS configuration to have any effect,
 # clients must have the `--accept-dns=true` option enabled. This is the
-# default for the Tailscale client. This option is enabled by default
-# in the Tailscale client.
+# default for the TapperVPN client. This option is enabled by default
+# in the TapperVPN client.
 #
 # Setting _any_ of the configuration and `--accept-dns=true` on the
 # clients will integrate with the DNS manager on the client or
@@ -343,7 +343,7 @@ dns:
   search_domains: []
 
   # Extra DNS records
-  # so far only A and AAAA records are supported (on the tailscale side)
+  # so far only A and AAAA records are supported (on the tappervpn side)
   # See: https://headscale.net/stable/ref/dns/
   extra_records: []
   #   - name: "grafana.myvpn.example.com"
@@ -359,7 +359,7 @@ dns:
   # extra_records_path: data/extra-records.json
 
   # Let nodes get TLS certificates for their MagicDNS name with
-  # `tailscale cert`. Requires dns.challenge.provider.
+  # `tappervpn cert`. Requires dns.challenge.provider.
   certificates:
     enabled: false
 
@@ -475,18 +475,18 @@ unix_socket_permission: "0770"
 #     method: S256
 
 # Logtail configuration
-# Logtail is Tailscales logging and auditing infrastructure, it allows the
-# control panel to instruct tailscale nodes to log their activity to a remote
+# Logtail is TapperVPNs logging and auditing infrastructure, it allows the
+# control panel to instruct tappervpn nodes to log their activity to a remote
 # server. To disable logging on the client side, please refer to:
 # https://tailscale.com/docs/features/logging#opt-out-of-client-logging
 logtail:
-  # Enable logtail for tailscale nodes of this Headscale instance.
+  # Enable logtail for tappervpn nodes of this Headscale instance.
   # As there is currently no support for overriding the log server in Headscale, this is
   # disabled by default. Enabling this will make your clients send logs to Tailscale Inc.
   enabled: false
 
 # Taildrop configuration
-# Taildrop is the file sharing feature of Tailscale, allowing nodes to
+# Taildrop is the file sharing feature of TapperVPN, allowing nodes to
 # send files to each other.
 # https://tailscale.com/docs/features/taildrop
 taildrop:

@@ -1,0 +1,9 @@
+[Unit]
+Description=TapperVPN NGINX Authentication socket
+PartOf=tappervpn.nginx-auth.service
+
+[Socket]
+ListenStream=/var/run/tappervpn.nginx-auth.sock
+
+[Install]
+WantedBy=sockets.target

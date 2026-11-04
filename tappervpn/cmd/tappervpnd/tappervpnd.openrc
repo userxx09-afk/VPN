@@ -1,0 +1,25 @@
+#!/sbin/openrc-run
+
+set -a
+source /etc/default/tappervpnd
+set +a
+
+command="/usr/sbin/tappervpnd"
+command_args="--state=/var/lib/tappervpn/tappervpnd.state --port=$PORT --socket=/var/run/tappervpn/tappervpnd.sock $FLAGS"
+command_background=true
+pidfile="/run/tappervpnd.pid"
+start_stop_daemon_args="-1 /var/log/tappervpnd.log -2 /var/log/tappervpnd.log"
+
+depend() {
+    need net
+}
+
+start_pre() {
+    mkdir -p /var/run/tappervpn
+    mkdir -p /var/lib/tappervpn
+    $command --cleanup
+}
+
+stop_post() {
+    $command --cleanup
+}
