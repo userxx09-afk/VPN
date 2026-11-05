@@ -74,6 +74,38 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
+# The server can also be a node of its own network (e.g. an exit node). Its
+# agent runs as tappervpnd; join it with server/join-exit-node.sh.
+[ -f /etc/default/tappervpnd ] || cat >/etc/default/tappervpnd <<'EOF'
+# UDP port for VPN traffic (forward it on the router for direct connections).
+PORT="41641"
+# Extra flags for tappervpnd.
+FLAGS=""
+EOF
+
+cat >/etc/systemd/system/tappervpnd.service <<'EOF'
+[Unit]
+Description=TapperVPN node agent
+Wants=network-pre.target
+After=network-pre.target NetworkManager.service systemd-resolved.service headscale.service
+
+[Service]
+EnvironmentFile=/etc/default/tappervpnd
+ExecStart=/usr/local/bin/tappervpnd --state=/var/lib/tappervpn/tappervpnd.state --socket=/run/tappervpn/tappervpnd.sock --port=${PORT} $FLAGS
+ExecStopPost=/usr/local/bin/tappervpnd --cleanup
+Restart=on-failure
+RuntimeDirectory=tappervpn
+RuntimeDirectoryMode=0755
+StateDirectory=tappervpn
+StateDirectoryMode=0700
+CacheDirectory=tappervpn
+CacheDirectoryMode=0750
+Type=notify
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 systemctl daemon-reload
 systemctl enable --now headscale tappervpn-update.timer
 systemctl restart headscale
