@@ -22,12 +22,12 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import com.tappervpn.ipn.ui.theme.onBackgroundLogoDotEnabled
 
-// The TapperVPN logo: a green "T →" gate sign on dark brown, after the
+// The TapperVPN logo: a neon green "T →" gate sign on black, after the
 // "Gates →" sign in the family photo it's based on. Exit nodes are gateways.
-val LogoBrown = Color(0xFF3A2418)
-val LogoPlate = Color(0xFF1F1410)
-val LogoPlateEdge = Color(0xFF5A3A28)
-val LogoGreen = Color(0xFF7FE0A8)
+val LogoBlack = Color(0xFF000000)
+val LogoPlate = Color(0xFF0A0A0A)
+val LogoPlateEdge = Color(0xFF1F6B2E)
+val LogoGreen = Color(0xFF39FF14)
 
 /**
  * Draws the logo in [modifier]'s (square) bounds. [animated] slides the arrow forward, for
@@ -57,7 +57,7 @@ fun TapperVPNLogoView(
   Canvas(modifier = modifier) {
     val s = size.minDimension
     if (!usesOnBackgroundColors) {
-      drawRoundRect(LogoBrown, size = Size(s, s), cornerRadius = CornerRadius(s * 0.22f))
+      drawRoundRect(LogoBlack, size = Size(s, s), cornerRadius = CornerRadius(s * 0.22f))
       val plateTop = Offset(s * 0.17f, s * 0.35f)
       val plateSize = Size(s * 0.66f, s * 0.30f)
       drawRoundRect(LogoPlate, plateTop, plateSize, CornerRadius(s * 0.04f))

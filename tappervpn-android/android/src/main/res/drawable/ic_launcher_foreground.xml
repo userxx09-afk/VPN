@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- TapperVPN logo: a green "T →" gate sign (background: ic_launcher_background). -->
+<!-- TapperVPN logo: a neon green "T →" gate sign on black (background: ic_launcher_background). -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
@@ -7,17 +7,17 @@
     android:viewportHeight="108">
   <path
       android:pathData="M30,41h48a3,3 0,0 1,3 3v20a3,3 0,0 1,-3 3h-48a3,3 0,0 1,-3 -3v-20a3,3 0,0 1,3 -3z"
-      android:fillColor="#1F1410"
-      android:strokeColor="#5A3A28"
+      android:fillColor="#0A0A0A"
+      android:strokeColor="#1F6B2E"
       android:strokeWidth="1.5"/>
   <path
       android:pathData="M33,48h12M39,48v13"
-      android:strokeColor="#7FE0A8"
+      android:strokeColor="#39FF14"
       android:strokeWidth="4"
       android:strokeLineCap="square"/>
   <path
       android:pathData="M50,54h23M65.5,46.5L73,54L65.5,61.5"
-      android:strokeColor="#7FE0A8"
+      android:strokeColor="#39FF14"
       android:strokeWidth="4"
       android:strokeLineCap="round"
       android:strokeLineJoin="round"/>
