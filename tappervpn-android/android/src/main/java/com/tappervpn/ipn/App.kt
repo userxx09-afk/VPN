@@ -68,6 +68,8 @@ class App : UninitializedApp(), libtappervpn.AppContext, ViewModelStoreOwner {
     const val KEY_EXPIRY_NOTIFICATION_ID = 3
     // Key to store the SAF URI in EncryptedSharedPreferences.
     private val PREF_KEY_SAF_URI = "saf_directory_uri"
+    // Control server picked with "Use an alternate server".
+    private const val PREF_KEY_CONTROL_URL = "tappervpn_control_url"
     private const val TAG = "App"
     private val interfaceJson = Json { encodeDefaults = true }
     private lateinit var appInstance: App
@@ -444,10 +446,12 @@ class App : UninitializedApp(), libtappervpn.AppContext, ViewModelStoreOwner {
   override fun getSyspolicyStringValue(key: String): String {
     val setting = MDMSettings.allSettingsByKey[key]?.flow?.value
     if (setting?.isSet != true) {
-      // TapperVPN: without an MDM LoginURL, use the build's control server,
-      // so the backend never falls back to TapperVPN's login server.
-      if (key == MDMSettings.loginURL.key && BuildConfig.DEFAULT_CONTROL_URL.isNotEmpty()) {
-        return BuildConfig.DEFAULT_CONTROL_URL
+      // TapperVPN: without an MDM LoginURL, use the server picked with "Use an
+      // alternate server", else the build's control server, so the backend
+      // never falls back to Tailscale's login server.
+      if (key == MDMSettings.loginURL.key) {
+        val url = chosenControlURL() ?: BuildConfig.DEFAULT_CONTROL_URL
+        if (url.isNotEmpty()) return url
       }
       throw MDMSettings.NoSuchKeyException()
     }
@@ -471,6 +475,16 @@ class App : UninitializedApp(), libtappervpn.AppContext, ViewModelStoreOwner {
       TSLog.d("MDM", "$key value cannot be serialized to JSON. Throwing NoSuchKeyException.")
       throw MDMSettings.NoSuchKeyException()
     }
+  }
+
+  /** The control server picked in the app, or null for the build's default. */
+  fun chosenControlURL(): String? =
+      getEncryptedPrefs().getString(PREF_KEY_CONTROL_URL, null)?.takeIf { it.isNotBlank() }
+
+  /** Remembers [url] as the control server (overriding the build's default). */
+  fun setChosenControlURL(url: String?) {
+    getEncryptedPrefs().edit().putString(PREF_KEY_CONTROL_URL, url?.trim()).commit()
+    notifyPolicyChanged()
   }
 
   fun notifyPolicyChanged() {

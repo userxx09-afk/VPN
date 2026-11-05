@@ -5,6 +5,7 @@ package com.tappervpn.ipn.ui.viewModel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.tappervpn.ipn.App
 import com.tappervpn.ipn.UninitializedApp
 import com.tappervpn.ipn.mdm.MDMSettings
 import com.tappervpn.ipn.ui.localapi.Client
@@ -231,6 +232,9 @@ open class IpnViewModel : ViewModel() {
       controlURL: String,
       completionHandler: (Result<Unit>) -> Unit = {},
   ) {
+    // TapperVPN pins the control server through the LoginURL policy (see
+    // App.getSyspolicyStringValue); remember this one so the policy follows it.
+    App.get().setChosenControlURL(controlURL)
     val prefs = Ipn.MaskedPrefs()
     prefs.ControlURL = controlURL
     login(prefs, completionHandler = completionHandler)

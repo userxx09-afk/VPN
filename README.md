@@ -98,7 +98,7 @@ installed one.
 | 2. Node daemon (leave running) | `scripts\start-node.ps1` (optional: `-Policy examples\approuting-chrome-only.json -LogFlows` for per-app routing) | Yes |
 | 3. Join the mesh | `scripts\join.ps1` (add `-Gateway` to advertise as gateway) | Yes |
 
-- Server config: `server/config.yaml` (listens on `0.0.0.0:8080`, advertises `http://192.168.5.207:8080`).
+- Server config: `server/config.yaml` (listens on `0.0.0.0:8080`, advertises `http://192.168.5.210:8080`).
   Data paths in it must be **relative** (to the config's folder): Headscale treats `C:/...` as relative.
 - Join key: `server/data/preauthkey.json`. Make a new one with
   `bin\headscale.exe -c server\config.yaml preauthkeys create --user 1 --reusable --expiration 72h`.
@@ -132,7 +132,7 @@ installed one.
 
 ## Production server (Ubuntu)
 
-The control server runs on the Ubuntu 24.04 VM `frank` (192.168.5.207, ssh alias `tapper`).
+The control server runs on the Ubuntu 24.04 VM `frank` (192.168.5.210, ssh alias `tapper`).
 
 | What | Where on the server |
 |---|---|
@@ -142,4 +142,4 @@ The control server runs on the Ubuntu 24.04 VM `frank` (192.168.5.207, ssh alias
 | Services | `systemctl status headscale`, `systemctl list-timers tappervpn-update.timer` |
 | Admin CLI | `headscale -c /etc/headscale/config.yaml nodes list`, run as the `headscale` user |
 
-Clients use `http://192.168.5.207:8080` (LAN only until HTTPS and port forwarding are set up).
+Clients use `http://192.168.5.210:8080` (LAN only until HTTPS and port forwarding are set up).
