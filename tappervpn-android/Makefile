@@ -23,9 +23,11 @@ export TS_USE_TOOLCHAIN=1
 # If set, additional comma-separated build tags passed to the libtappervpn Go
 # build to control feature selection.
 #
-# As of 2026-04-15, we disable netmap caching on Android until we have UI
-# affordances for debugging it.
-GOMOBILE_BUILD_TAGS := ts_omit_cachenetmap
+# Upstream (2026-04-15) disables netmap caching on Android until it has UI
+# for debugging it. TapperVPN keeps it on: with the cache, a device that
+# restarts while the control server is down still reconnects to its peers.
+# (The server turns it on per device with the "cache-network-maps" nodeAttr.)
+GOMOBILE_BUILD_TAGS :=
 
 # Pull androidApiLevel from gradle.properties.
 ANDROID_API_LEVEL := $(shell grep '^androidApiLevel=' android/gradle.properties | cut -d'=' -f2)

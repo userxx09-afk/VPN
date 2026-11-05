@@ -90,7 +90,7 @@ try {
             "-X tappervpn.com/version.extraGitCommitStamp=$($ver.VERSION_EXTRA_HASH) " +
             "-X tappervpn.com/updater.Version=$tvVersion"
         & "$gobin\gomobile.exe" bind -target android -androidapi 26 `
-            -tags "not_tappervpn_go ts_omit_cachenetmap" `
+            -tags "not_tappervpn_go" `
             -ldflags $ldflags `
             -o (Join-Path $app "android\libs\libtappervpn.aar") ./libtappervpn
         if ($LASTEXITCODE) { throw "gomobile bind failed" }

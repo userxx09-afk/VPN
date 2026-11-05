@@ -14,6 +14,9 @@
 
   // Per-app routing policy, pushed to every node. Apps not listed go direct.
   "nodeAttrs": [
+    // Devices save the network map to disk, so after a restart they can
+    // reconnect to their peers even while the control server is down.
+    { "target": ["*"], "attr": ["cache-network-maps"] },
     {
       "target": ["*"],
       "app": {
