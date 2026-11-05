@@ -3,6 +3,9 @@
 
 package com.tappervpn.ipn.ui.view
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.padding
@@ -19,9 +22,11 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.SpanStyle
@@ -30,6 +35,7 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.tappervpn.ipn.AppUpdater
 import com.tappervpn.ipn.BuildConfig
 import com.tappervpn.ipn.R
 import com.tappervpn.ipn.mdm.AlwaysNeverUserDecides
@@ -45,6 +51,7 @@ import com.tappervpn.ipn.ui.util.set
 import com.tappervpn.ipn.ui.viewModel.AppViewModel
 import com.tappervpn.ipn.ui.viewModel.SettingsNav
 import com.tappervpn.ipn.ui.viewModel.SettingsViewModel
+import kotlinx.coroutines.launch
 
 @Composable
 fun SettingsView(
@@ -163,6 +170,9 @@ fun SettingsView(
       Setting.Text(R.string.bug_report, onClick = settingsNav.onNavigateToBugReport)
 
       Lists.ItemDivider()
+      CheckForUpdatesSetting()
+
+      Lists.ItemDivider()
       Setting.Text(
           R.string.about_tappervpn,
           subtitle = "${stringResource(id = R.string.version)} ${BuildConfig.TAPPERVPN_VERSION}",
@@ -204,6 +214,52 @@ fun SettingsView(
     )
   }
 }
+
+/**
+ * "Check for updates": checks GitHub now and, when a newer version is downloaded and verified,
+ * offers to install it (one tap, plus Android's own confirmation).
+ */
+@Composable
+private fun CheckForUpdatesSetting() {
+  val context = LocalContext.current
+  val scope = rememberCoroutineScope()
+  var checking by remember { mutableStateOf(false) }
+  var status by remember { mutableStateOf<String?>(null) }
+  val checkingText = stringResource(R.string.update_checking)
+
+  Setting.Text(
+      R.string.update_check,
+      subtitle = status,
+      enabled = !checking,
+      onClick = {
+        checking = true
+        status = checkingText
+        scope.launch {
+          val r = AppUpdater.checkNow(context.applicationContext)
+          checking = false
+          status =
+              when (r) {
+                is AppUpdater.CheckResult.UpToDate ->
+                    context.getString(R.string.update_up_to_date, r.version)
+                is AppUpdater.CheckResult.Ready ->
+                    context.getString(R.string.update_ready_text, r.version)
+                is AppUpdater.CheckResult.Failed ->
+                    context.getString(R.string.update_check_failed, r.message)
+              }
+          if (r is AppUpdater.CheckResult.Ready) {
+            context.findActivity()?.let { AppUpdater.promptIfReady(it, fromNotification = true) }
+          }
+        }
+      },
+  )
+}
+
+private tailrec fun Context.findActivity(): Activity? =
+    when (this) {
+      is Activity -> this
+      is ContextWrapper -> baseContext.findActivity()
+      else -> null
+    }
 
 object Setting {
   @Composable

@@ -27,6 +27,8 @@ import java.net.URL
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import libtappervpn.Libtappervpn
 import org.json.JSONObject
@@ -49,6 +51,10 @@ object AppUpdater {
   private const val PREFS = "app-updater"
   private const val PREF_READY_VERSION = "ready-version"
   private const val PREF_DECLINED_VERSION = "declined-version"
+  private const val PREF_LAST_CHECK = "last-check-ms"
+  // Opening the app checks again once the last check is this old.
+  private val CHECK_ON_OPEN_AFTER_MS = TimeUnit.HOURS.toMillis(6)
+  private val checking = Mutex()
   const val CHANNEL_ID = "tappervpn-updates"
   const val NOTIFICATION_ID = 41
   const val EXTRA_INSTALL_UPDATE = "com.tappervpn.ipn.INSTALL_UPDATE"
@@ -72,6 +78,10 @@ object AppUpdater {
       withContext(Dispatchers.IO) {
         val release = JSONObject(fetch("https://api.github.com/repos/$REPO/releases/latest").decodeToString())
         val version = release.getString("tag_name").removePrefix("v")
+        prefs(context).edit().putLong(PREF_LAST_CHECK, System.currentTimeMillis()).apply()
+        if (readyVersion(context) == version) {
+          return@withContext version // already downloaded and verified
+        }
         if (!isNewer(version, BuildConfig.TAPPERVPN_VERSION)) {
           TSLog.d(TAG, "up to date (installed ${BuildConfig.TAPPERVPN_VERSION}, latest $version)")
           return@withContext null
@@ -110,6 +120,35 @@ object AppUpdater {
     }
     return v
   }
+
+  /** Whether opening the app should check for an update (the daily check can lag on idle TVs). */
+  fun shouldCheckOnOpen(context: Context): Boolean =
+      readyVersion(context) == null &&
+          System.currentTimeMillis() - prefs(context).getLong(PREF_LAST_CHECK, 0) >
+              CHECK_ON_OPEN_AFTER_MS
+
+  /** Result of [checkNow]. */
+  sealed class CheckResult {
+    data class UpToDate(val version: String) : CheckResult()
+
+    data class Ready(val version: String) : CheckResult()
+
+    data class Failed(val message: String) : CheckResult()
+  }
+
+  /**
+   * "Check for updates": checks GitHub now and downloads a newer version. When one is ready, the
+   * caller offers to install it with [promptIfReady].
+   */
+  suspend fun checkNow(context: Context): CheckResult =
+      try {
+        // One check at a time (opening the app and the button can overlap).
+        val v = checking.withLock { checkAndDownload(context) }
+        if (v != null) CheckResult.Ready(v) else CheckResult.UpToDate(BuildConfig.TAPPERVPN_VERSION)
+      } catch (e: Exception) {
+        TSLog.e(TAG, "update check failed: $e")
+        CheckResult.Failed(e.message ?: e.toString())
+      }
 
   fun notifyReady(context: Context, version: String) {
     val intent =
@@ -220,14 +259,9 @@ object AppUpdater {
 
 class UpdateCheckWorker(appContext: Context, params: WorkerParameters) :
     CoroutineWorker(appContext, params) {
-  override suspend fun doWork(): Result =
-      try {
-        AppUpdater.checkAndDownload(applicationContext)?.let {
-          AppUpdater.notifyReady(applicationContext, it)
-        }
-        Result.success()
-      } catch (e: Exception) {
-        TSLog.e("AppUpdater", "update check failed: $e")
-        Result.success() // try again at the next daily run, not in a retry loop
-      }
+  override suspend fun doWork(): Result {
+    val r = AppUpdater.checkNow(applicationContext)
+    if (r is AppUpdater.CheckResult.Ready) AppUpdater.notifyReady(applicationContext, r.version)
+    return Result.success() // on failure, try again at the next daily run, not in a retry loop
+  }
 }

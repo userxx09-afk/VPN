@@ -308,6 +308,10 @@
     <string name="update_ready_text">Version %1$s is downloaded and verified.</string>
     <string name="update_install">Install</string>
     <string name="update_not_now">Not now</string>
+    <string name="update_check">Check for updates</string>
+    <string name="update_checking">Checking…</string>
+    <string name="update_up_to_date">You have the latest version (%1$s).</string>
+    <string name="update_check_failed">Couldn\'t check for updates: %1$s</string>
     <string name="copy_ip_address">Copy IP Address</string>
     <string name="ping">Ping</string>
     <string name="relayed_connection">Relayed connection (%1$s)</string>

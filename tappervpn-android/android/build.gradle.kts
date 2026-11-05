@@ -165,10 +165,20 @@ fun getVersionProperty(key: String): String {
 
 fun tappervpnVersion(): String = project.file("../../VERSION").readText().trim()
 
+// From the TapperVPN version (VERSION), so every release has a higher code than
+// the one before and Android accepts it as an update, while rebuilds of the same
+// version (e.g. test builds) get the same code and don't block the next release.
+// 0.2.2 -> 300_020_200. Starts at 300M: above the build-time codes of 0.2.0/0.2.1.
 fun computeVersionCode(): Int {
   val baseProperty = project.findProperty("VERSION_CODE_BASE")
 
-  val base = baseProperty?.toString()?.toLong() ?: ((System.currentTimeMillis() / 60_000L) * 10L)
+  val (major, minor, patch) =
+      tappervpnVersion().split('.').map { it.toInt() }.also {
+        require(it.size == 3 && it[1] < 100 && it[2] < 100) { "VERSION must be like 1.2.3" }
+      }
+  val base =
+      baseProperty?.toString()?.toLong()
+          ?: (300_000_000L + major * 1_000_000L + minor * 10_000L + patch * 100L)
 
   val platform = if (isTV()) 1 else 0
   return (base + platform).toInt()

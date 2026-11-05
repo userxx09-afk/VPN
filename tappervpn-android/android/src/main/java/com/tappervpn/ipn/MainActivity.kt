@@ -609,6 +609,13 @@ class MainActivity : ComponentActivity() {
     val fromNotification = intent.getBooleanExtra(AppUpdater.EXTRA_INSTALL_UPDATE, false)
     intent.removeExtra(AppUpdater.EXTRA_INSTALL_UPDATE)
     AppUpdater.promptIfReady(this, fromNotification)
+    if (AppUpdater.shouldCheckOnOpen(this)) {
+      lifecycleScope.launch {
+        if (AppUpdater.checkNow(applicationContext) is AppUpdater.CheckResult.Ready) {
+          AppUpdater.promptIfReady(this@MainActivity, fromNotification = false)
+        }
+      }
+    }
   }
 
   override fun onStop() {
