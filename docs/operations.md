@@ -74,6 +74,21 @@ one-time key and approves the exit routes.
 On a device: **Exit node → tapper**. All its internet traffic then goes
 through tapper and out the home connection.
 
+## When the control server is down
+
+Devices that are already connected keep talking: traffic goes device to
+device (or through Tailscale's public relays), not through the control
+server. Since 0.2.3 every device also saves its network map to disk (policy
+nodeAttr `cache-network-maps`), so a device that restarts during an outage
+still reconnects to its peers. What stops working until the server is back:
+signing in new devices and changing rules or exit nodes.
+
+Plan for three sites (one exposed primary, two standbys that aren't exposed):
+the primary copies its database and keys to the standbys continuously; a
+standby is started only when the primary has been unreachable for a while
+(manual command first, automatic later); clients get a fallback list of
+control server addresses. Only one control server may run at a time.
+
 ## Moving the server to another machine
 
 1. On the old server, stop and copy the state:
