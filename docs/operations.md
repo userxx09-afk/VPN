@@ -112,6 +112,8 @@ file in the repo). Devices pick a release up within a day.
 | Captive-portal checks against relays failed | `X-Tailscale-Challenge/Response` headers renamed | Protected in `rebrand.py` |
 | "Use an alternate server" was ignored; every login went to the built-in address | The built-in address was handed out as the LoginURL policy, which the backend treats as locked | 0.2.1: the app remembers the address picked there and uses it as the policy |
 | Log in did nothing after the server's IP changed (.207 → .210) | The address was built into the app; DHCP moved the server | 0.2.1 points at .210; reserve the server's addresses on both routers |
+| Update downloaded, then "App not installed" | A test build installed by hand had a higher versionCode (it came from the build time) than the release | 0.2.2: versionCode comes from `VERSION`, so releases always go up |
+| Update not offered for hours | The background check runs once a day | 0.2.2: Settings → Check for updates, and opening the app checks if the last check is 6+ hours old |
 | Fire TV install failed: signature mismatch | The old app was signed with a key that was lost | Uninstalled, reinstalled; keep `%USERPROFILE%\.android\debug.keystore` backed up |
 | Fire TV app crashed (SIGSYS) | Stock Go uses `futex_time64`, which Fire OS's seccomp kills | Build Android with the patched Go (`patches\go-android-time32.patch`) |
 | Fire TV VPN prompt "auto-rejected" | The TV was asleep when the prompt came up | Wake it, choose Try again, then OK |
