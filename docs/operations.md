@@ -8,27 +8,43 @@ database) are never in this repo; see "What is not in the repo" in the
 
 ## The network
 
-```
-Internet
-  └─ 192.168.1.1     ISP gateway (Calix). Its Wi-Fi: Fire TV.
-       │              Server's 2nd card, eth1: 192.168.1.182
-       └─ 192.168.4.1  inner router (eero), 192.168.4.0/22. Build PC, phone.
-                       Server's 1st card, eth0: 192.168.5.210 fixed, plus
-                       whatever the eero hands out by DHCP (default route)
-```
+The network was rearranged on 2026-11-05. The PC and tapper are now on
+10.0.0.0/24 (gateway 10.0.0.1, Comcast DNS). tapper's eth1 has
+10.0.0.156 by DHCP and carries the default route; eth0 (the old eero card,
+with the fixed 192.168.5.210) is unplugged. Nobody needs to know tapper's
+address any more: devices find it on the local network (next section).
 
-eth0 keeps DHCP and also carries 192.168.5.210 as a fixed second address
-(NetworkManager connection "Wired connection 1", `ipv4.addresses`), so the
-control server's address no longer moves when the eero changes the lease.
-To undo: `sudo nmcli connection modify "Wired connection 1" ipv4.addresses ""`
-then `sudo nmcli connection up "Wired connection 1"`. (`nmcli device reapply`
-saves the setting but doesn't apply the new address; `connection up` does.)
-Do that from eth1 (192.168.1.182) or the Hyper-V console, since eth0 drops for
-a moment.
+If eth1's NetworkManager connection ("Wired connection 2") ever says
+`ipv4.never-default yes`, tapper has no internet and headscale won't start
+(it downloads Tailscale's relay map at startup). Fix:
+`sudo nmcli connection modify "Wired connection 2" ipv4.never-default no`
+then `sudo nmcli connection up "Wired connection 2"`.
 
-The server sits on both networks. Its internet traffic goes out through the
-eero and then the Calix (double NAT); eth1 reaches the Calix directly, so a
-port forward on the Calix alone can expose the server.
+## How devices find the control server
+
+Devices (0.2.4+) are set up with one address, **https://vp.tapper.co**.
+Every time one connects, it first asks the local network (mDNS, service
+`_tappervpn._tcp`) whether a control server is there:
+
+- tapper announces itself with avahi (`/etc/avahi/services/tappervpn.service`,
+  installed by `server/install.sh`).
+- A device only uses a server that holds the control key built into the app
+  (`ServerKey` in `tappervpn/control/localcontrol`), so a stranger's server
+  on some other network can't pose as ours. Standby servers must use the
+  same `/var/lib/headscale/noise_private.key`.
+- If nothing answers, the device uses vp.tapper.co. Switching between the
+  two never signs a device out: it's the same server.
+- Check from the build PC: `go run ./cmd/localcontrol-probe` in `tappervpn/`.
+  From Linux: `avahi-browse -rt _tappervpn._tcp`.
+
+**vp.tapper.co doesn't exist in DNS yet.** Until it does (A record to the
+public IP, port forward, HTTPS on tapper), devices only reach the server
+at home.
+
+`server_url` in `/etc/headscale/config.yaml` only sets the address shown on
+sign-in pages; it's `http://10.0.0.156:8080` for now and becomes
+`https://vp.tapper.co` once that works. tapper's own node talks to
+`http://127.0.0.1:8080`.
 
 ## The server ("tapper")
 
@@ -37,7 +53,8 @@ Ubuntu 24.04 Hyper-V VM `frank`, ssh alias `tapper`, passwordless sudo.
 | What | Where |
 |---|---|
 | Control server | `headscale.service`, listens on `0.0.0.0:8080` (both cards) |
-| Advertised address | `server_url` in `/etc/headscale/config.yaml`: `http://192.168.5.210:8080` |
+| Sign-in page address | `server_url` in `/etc/headscale/config.yaml` (now `http://10.0.0.156:8080`) |
+| Local announcement | avahi, `/etc/avahi/services/tappervpn.service` |
 | Database and keys | `/var/lib/headscale/` (`db.sqlite`, `noise_private.key`) |
 | Policy | `/etc/headscale/policy.hujson` |
 | The server's own VPN node | `tappervpnd.service`, state in `/var/lib/tappervpn/`, node name `tapper`, exit node |
@@ -138,6 +155,8 @@ file in the repo). Devices pick a release up within a day.
 | "Use an alternate server" was ignored; every login went to the built-in address | The built-in address was handed out as the LoginURL policy, which the backend treats as locked | 0.2.1: the app remembers the address picked there and uses it as the policy |
 | Log in did nothing after the server's IP changed (.207 → .210) | The address was built into the app; DHCP moved the server | 0.2.1 points at .210; reserve the server's addresses on both routers |
 | No device could reach the control server; tapper's own node offline; already-connected devices still worked | The eero moved eth0 again (.210 → .211, 2026-11-05) | Added .210 as a fixed second address on eth0 (see "The network"); reach the server over eth1 192.168.1.182 if eth0 is lost |
+| Control server down after the network was rearranged; headscale kept restarting | eth1 was set to never carry the default route (fine while eth0 had it); with eth0 unplugged tapper had no DNS, and headscale exits if it can't download the relay map | Let eth1 carry the default route (see "The network") |
+| Devices stuck on an old address every time the network changed | Server address built into the app | 0.2.4: devices look for the server on the local network, then vp.tapper.co |
 | Update downloaded, then "App not installed" | A test build installed by hand had a higher versionCode (it came from the build time) than the release | 0.2.2: versionCode comes from `VERSION`, so releases always go up |
 | Update not offered for hours | The background check runs once a day | 0.2.2: Settings → Check for updates, and opening the app checks if the last check is 6+ hours old |
 | Fire TV install failed: signature mismatch | The old app was signed with a key that was lost | Uninstalled, reinstalled; keep `%USERPROFILE%\.android\debug.keystore` backed up |
@@ -150,11 +169,9 @@ file in the repo). Devices pick a release up within a day.
 
 ## Still to do
 
-- Outside access: DuckDNS name (in progress), port forward TCP 443 (and UDP
-  41641) on the Calix to 192.168.1.182, HTTPS on the server, app 0.2.2 with
-  the name built in.
-- DHCP reservations: 192.168.5.210 on the eero (so it never hands .210 to
-  another device; tapper already holds it as a fixed address), 192.168.1.182
-  on the Calix.
+- vp.tapper.co: DNS A record to the home public IP, port forward TCP 443
+  (and UDP 41641) to tapper, HTTPS on headscale, then `server_url`.
+- headscale shouldn't die when it can't download the relay map: keep a
+  local copy under `derp.paths`.
 - Rename the MagicDNS domain (`meshwall.internal`, the old project name).
 - Test the router package on a real GL.iNet router.

@@ -8,8 +8,10 @@ set -eu
 
 USER_NAME=${1:-admin}
 NODE_NAME=${2:-tapper}
-SERVER=$(sed -n 's/^server_url:[[:space:]]*//p' /etc/headscale/config.yaml | tr -d '"' | head -1)
-[ -n "$SERVER" ] || { echo "no server_url in /etc/headscale/config.yaml" >&2; exit 1; }
+# The control server runs on this machine, so talk to it locally: that
+# address never changes when the machine's network address does.
+PORT=$(sed -n 's/^listen_addr:.*:\([0-9][0-9]*\).*$/\1/p' /etc/headscale/config.yaml | head -1)
+SERVER=${SERVER:-http://127.0.0.1:${PORT:-8080}}
 
 # Exit nodes forward traffic for other devices.
 cat >/etc/sysctl.d/99-tappervpn-forwarding.conf <<'EOF'
@@ -26,7 +28,7 @@ KEY=$(headscale preauthkeys create --user "$USER_NAME" --expiration 10m -o json 
 [ -n "$KEY" ] && [ "$KEY" != null ] || { echo "couldn't create a key for user $USER_NAME" >&2; exit 1; }
 
 tappervpn up --login-server "$SERVER" --auth-key "$KEY" --hostname "$NODE_NAME" \
-	--advertise-exit-node --accept-dns=false --reset
+	--advertise-exit-node --accept-dns=false --reset --force-reauth
 
 # Approve the exit routes (0.0.0.0/0 and ::/0) the node just advertised.
 sleep 3

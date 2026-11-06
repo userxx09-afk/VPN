@@ -477,9 +477,20 @@ class App : UninitializedApp(), libtappervpn.AppContext, ViewModelStoreOwner {
     }
   }
 
-  /** The control server picked in the app, or null for the build's default. */
+  /**
+   * The control server picked in the app, or null for the build's default.
+   * The old built-in LAN addresses count as "not picked": since 0.2.4 the
+   * default (vp.tapper.co) finds the server on the local network by itself.
+   */
   fun chosenControlURL(): String? =
-      getEncryptedPrefs().getString(PREF_KEY_CONTROL_URL, null)?.takeIf { it.isNotBlank() }
+      getEncryptedPrefs()
+          .getString(PREF_KEY_CONTROL_URL, null)
+          ?.trim()
+          ?.trimEnd('/')
+          ?.takeIf { it.isNotBlank() && it !in OLD_BUILT_IN_CONTROL_URLS }
+
+  private val OLD_BUILT_IN_CONTROL_URLS =
+      setOf("http://192.168.5.207:8080", "http://192.168.5.210:8080")
 
   /** Remembers [url] as the control server (overriding the build's default). */
   fun setChosenControlURL(url: String?) {

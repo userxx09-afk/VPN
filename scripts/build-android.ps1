@@ -8,7 +8,7 @@ param(
     [switch]$Restamp,  # regenerate tappervpn.version (after go.mod changes)
     # Control server the app signs in to (our Headscale). Use an address every
     # device can reach; give the server a DHCP reservation so it doesn't change.
-    [string]$ControlURL = "http://192.168.5.210:8080"
+    [string]$ControlURL = "https://vp.tapper.co"
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent

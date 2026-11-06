@@ -106,6 +106,30 @@ Type=notify
 WantedBy=multi-user.target
 EOF
 
+# Announce the control server on the local network (mDNS / DNS-SD), so
+# clients set up for the public name use this server directly when they're
+# on the same network. Clients only accept a server holding the control key
+# built into them, so every standby must use the same noise_private.key.
+if [ -d /etc/avahi ] || apt-get install -y avahi-daemon >/dev/null 2>&1; then
+	install -d -m 0755 /etc/avahi/services
+	cat > /etc/avahi/services/tappervpn.service <<'EOF'
+<?xml version="1.0" standalone='no'?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<service-group>
+  <name replace-wildcards="yes">TapperVPN control on %h</name>
+  <service protocol="ipv4">
+    <type>_tappervpn._tcp</type>
+    <port>8080</port>
+    <txt-record>path=/</txt-record>
+  </service>
+</service-group>
+EOF
+	systemctl enable --now avahi-daemon >/dev/null 2>&1 || true
+	systemctl reload avahi-daemon 2>/dev/null || true
+else
+	echo "Couldn't install avahi-daemon; clients won't find this server on the local network." >&2
+fi
+
 systemctl daemon-reload
 systemctl enable --now headscale tappervpn-update.timer
 systemctl restart headscale

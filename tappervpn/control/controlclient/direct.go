@@ -32,6 +32,7 @@ import (
 
 	"go4.org/mem"
 	"tappervpn.com/control/controlknobs"
+	"tappervpn.com/control/localcontrol"
 	"tappervpn.com/control/ts2021"
 	"tappervpn.com/envknob"
 	"tappervpn.com/feature"
@@ -105,6 +106,7 @@ type Direct struct {
 	discoPubKey     key.DiscoPublic // protected by mu; can be updated via [SetDiscoPublicKey]
 	ipForwardBroken bool            // protected by mu; can be updated via [SetIPForwardingBroken]
 
+	localCtl    *localcontrol.Finder                         // non-nil if serverURL uses local discovery (TapperVPN)
 	sfGroup     singleflight.Group[struct{}, *ts2021.Client] // protects noiseClient creation.
 	noiseClient *ts2021.Client                               // also protected by mu
 
@@ -389,6 +391,9 @@ func NewDirect(opts Options) (*Direct, error) {
 		dialPlan:          opts.DialPlan,
 	}
 	c.discoPubKey = opts.DiscoPublicKey
+	if localcontrol.Applies(opts.ServerURL) && opts.NoiseTestClient == nil {
+		c.localCtl = localcontrol.NewFinder(opts.Logf, netMon)
+	}
 	c.closedCtx, c.closeCtx = context.WithCancel(context.Background())
 
 	c.controlClientID = nextControlClientID.Add(1)
@@ -678,7 +683,7 @@ func (c *Direct) doLogin(ctx context.Context, opt loginOpt) (mustRegen bool, new
 
 	c.logf("doLogin(regen=%v, hasUrl=%v)", regen, opt.URL != "")
 	if serverKey.IsZero() {
-		keys, err := loadServerPubKeys(ctx, c.httpc, c.serverURL)
+		keys, err := c.loadServerPubKeys(ctx)
 		if err != nil && c.interceptedDial != nil && c.interceptedDial.Load() {
 			c.health.SetUnhealthy(macOSScreenTime, nil)
 		} else {
@@ -1747,6 +1752,8 @@ func (c *Direct) getNoiseClient() (*ts2021.Client, error) {
 			HealthTracker: c.health,
 			ExtraRootCAs:  c.extraRootCAs,
 			DialPlan:      dp,
+			FindLocal:     c.findLocalFunc(),
+			ForgetLocal:   c.localCtl.Forget,
 		})
 		if err != nil {
 			return nil, err
@@ -1760,6 +1767,34 @@ func (c *Direct) getNoiseClient() (*ts2021.Client, error) {
 		return nil, err
 	}
 	return nc, nil
+}
+
+// loadServerPubKeys fetches the control server's keys, from the control
+// server on the local network if there is one (TapperVPN), otherwise from
+// serverURL.
+func (c *Direct) loadServerPubKeys(ctx context.Context) (*tailcfg.OverTLSPublicKeyResponse, error) {
+	if local := c.localCtl.Find(ctx); local != "" {
+		keys, err := loadServerPubKeys(ctx, c.httpc, local)
+		if err == nil && keys.PublicKey.String() == localcontrol.ServerKey {
+			c.logf("control server key from local server %s", local)
+			return keys, nil
+		}
+		if err == nil {
+			err = errors.New("wrong control key")
+		}
+		c.logf("local control server %s: %v; trying %s", local, err, c.serverURL)
+		c.localCtl.Forget()
+	}
+	return loadServerPubKeys(ctx, c.httpc, c.serverURL)
+}
+
+// findLocalFunc returns the hook ts2021 uses to look for a control server
+// on the local network, or nil if this server URL doesn't use discovery.
+func (c *Direct) findLocalFunc() func(context.Context) string {
+	if c.localCtl == nil {
+		return nil
+	}
+	return c.localCtl.Find
 }
 
 // setDNSNoise sends the SetDNSRequest request to the control plane server over Noise,

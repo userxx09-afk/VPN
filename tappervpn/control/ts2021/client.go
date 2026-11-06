@@ -95,6 +95,14 @@ type ClientOpts struct {
 	// on how to connect to the server.
 	DialPlan func() *tailcfg.ControlDialPlan
 
+	// FindLocal, if set, returns the base URL of a control server on the
+	// local network ("http://10.0.0.156:8080") to try before ServerURL, or
+	// "" for none. ForgetLocal is called when that server can't be reached.
+	// The Noise handshake still checks ServerPubKey, so a local server is
+	// only used if it is the same control server. (TapperVPN)
+	FindLocal   func(context.Context) string
+	ForgetLocal func()
+
 	// ProtocolVersion, if non-zero, specifies an alternate
 	// protocol version to use instead of the default,
 	// of [tailcfg.CurrentCapabilityVersion].
@@ -244,6 +252,19 @@ func (nc *Client) dial(ctx context.Context) (*Conn, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	if nc.opts.FindLocal != nil {
+		if base := nc.opts.FindLocal(ctx); base != "" {
+			if conn, err := nc.dialLocal(ctx, base, timeout); err == nil {
+				return conn, nil
+			} else {
+				nc.logf("local control server %s: %v; trying %s", base, err, nc.opts.ServerURL)
+				if nc.opts.ForgetLocal != nil {
+					nc.opts.ForgetLocal()
+				}
+			}
+		}
+	}
+
 	chd := &controlhttp.Dialer{
 		Hostname:        nc.host,
 		HTTPPort:        nc.httpPort,
@@ -264,7 +285,45 @@ func (nc *Client) dial(ctx context.Context) (*Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+	return nc.addConn(clientConn)
+}
 
+// dialLocal connects to the control server on the local network at base
+// (plain HTTP, Noise inside), giving up after a few seconds so that the
+// public address can still be tried within the same dial.
+func (nc *Client) dialLocal(ctx context.Context, base string, timeout time.Duration) (*Conn, error) {
+	u, err := url.Parse(base)
+	if err != nil {
+		return nil, err
+	}
+	if timeout > 6*time.Second {
+		timeout = 6 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	chd := &controlhttp.Dialer{
+		Hostname:        u.Hostname(),
+		HTTPPort:        cmp.Or(u.Port(), "80"),
+		HTTPSPort:       controlhttp.NoPort,
+		MachineKey:      nc.opts.PrivKey,
+		ControlKey:      nc.opts.ServerPubKey,
+		ProtocolVersion: cmp.Or(nc.opts.ProtocolVersion, uint16(tailcfg.CurrentCapabilityVersion)),
+		Dialer:          nc.opts.Dialer.SystemDial,
+		DNSCache:        nc.opts.DNSCache,
+		Logf:            nc.logf,
+		NetMon:          nc.opts.NetMon,
+		HealthTracker:   nc.opts.HealthTracker,
+		Clock:           tstime.StdClock{},
+	}
+	clientConn, err := chd.Dial(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return nc.addConn(clientConn)
+}
+
+// addConn wraps a new Noise connection and adds it to the pool.
+func (nc *Client) addConn(clientConn *controlhttp.ClientConn) (*Conn, error) {
 	nc.mu.Lock()
 
 	handle := set.NewHandle()
