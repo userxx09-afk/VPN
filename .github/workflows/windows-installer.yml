@@ -1,0 +1,91 @@
+# Builds TapperVPN-Setup.exe (installer/tappervpn.iss) from a release's signed
+# tappervpn-windows-amd64.zip and attaches it to that release, so the newest
+# installer is always at
+#   https://github.com/userxx09-afk/VPN/releases/latest/download/TapperVPN-Setup.exe
+#
+# Runs when a release is published (scripts\release.ps1 -Publish), or by hand:
+# Actions > Windows installer > Run workflow (tag, or empty for the latest).
+# On pull requests that touch the installer it builds from the latest release
+# and keeps the .exe as a workflow artifact instead of attaching it.
+name: Windows installer
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag (e.g. v0.2.4); empty for the latest release
+        required: false
+  pull_request:
+    paths:
+      - installer/**
+      - .github/workflows/windows-installer.yml
+
+permissions:
+  contents: write
+
+jobs:
+  installer:
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tappervpn/go.mod
+          cache-dependency-path: tappervpn/go.sum
+
+      - name: Pick the release
+        shell: pwsh
+        run: |
+          $tag = $env:TAG
+          if (-not $tag) { $tag = gh release view --repo $env:GITHUB_REPOSITORY --json tagName --jq .tagName }
+          if ($tag -notmatch '^v(\d+\.\d+\.\d+)$') { throw "tag '$tag' doesn't look like v1.2.3" }
+          "TAG=$tag" >> $env:GITHUB_ENV
+          "VERSION=$($Matches[1])" >> $env:GITHUB_ENV
+          Write-Host "Building the installer for $tag"
+
+      - name: Download and check the signed Windows zip
+        shell: pwsh
+        run: |
+          gh release download $env:TAG --repo $env:GITHUB_REPOSITORY --dir dl `
+            --pattern tappervpn-windows-amd64.zip --pattern SHA256SUMS --pattern SHA256SUMS.sig
+          # Signature: the same check devices make, against tappervpn/updater/release.pub.
+          Push-Location tappervpn
+          go run ./cmd/tappervpn-release verify ../dl
+          if ($LASTEXITCODE) { throw "SHA256SUMS signature check failed" }
+          Pop-Location
+          # Hash of the zip against the signed list.
+          $line = Get-Content dl\SHA256SUMS | Where-Object { $_ -match '\s\*?tappervpn-windows-amd64\.zip$' }
+          if (-not $line) { throw "tappervpn-windows-amd64.zip isn't in SHA256SUMS" }
+          $want = ($line -split '\s+')[0]
+          $got = (Get-FileHash dl\tappervpn-windows-amd64.zip -Algorithm SHA256).Hash
+          if ($got -ne $want) { throw "zip hash $got doesn't match SHA256SUMS ($want)" }
+          Expand-Archive dl\tappervpn-windows-amd64.zip installer\payload
+          Get-ChildItem installer\payload
+
+      - name: Build TapperVPN-Setup.exe
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup --yes --no-progress
+            if ($LASTEXITCODE) { throw "installing Inno Setup failed" }
+          }
+          & $iscc "/DAppVersion=$env:VERSION" installer\tappervpn.iss
+          if ($LASTEXITCODE) { throw "ISCC failed" }
+          Get-FileHash dist\TapperVPN-Setup.exe -Algorithm SHA256 | Format-List
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TapperVPN-Setup-${{ env.VERSION }}
+          path: dist/TapperVPN-Setup.exe
+
+      - name: Attach to the release
+        if: github.event_name != 'pull_request'
+        shell: pwsh
+        run: gh release upload $env:TAG dist\TapperVPN-Setup.exe --repo $env:GITHUB_REPOSITORY --clobber

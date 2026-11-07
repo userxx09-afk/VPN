@@ -15,3 +15,7 @@ tappervpn-android/*.version
 
 # Headscale runtime socket (its unix_socket path resolves from the working dir)
 data/
+
+# Windows installer build (installer/tappervpn.iss)
+dist/
+installer/payload/
