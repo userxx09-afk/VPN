@@ -4,6 +4,8 @@
 #
 # To release: change VERSION (e.g. 0.2.5) and push it to main. Or: Actions >
 # Release > Run workflow (releases whatever VERSION says on main).
+# A push that changes this workflow but not VERSION, or "dry run" ticked when
+# running it by hand, builds everything without signing or publishing.
 #
 # Needs two repository secrets (Settings > Secrets and variables > Actions),
 # added once from the PC that has the keys:
@@ -17,7 +19,7 @@ name: Release
 on:
   push:
     branches: [main]
-    paths: [VERSION]
+    paths: [VERSION, .github/workflows/release.yml]
   workflow_dispatch:
     inputs:
       dry_run:
@@ -37,11 +39,11 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.version.outputs.tag }}
+      dry_run: ${{ steps.version.outputs.dry_run }}
     env:
       GH_TOKEN: ${{ github.token }}
       OUT: ${{ github.workspace }}/bin/release/out
       STAGE: ${{ github.workspace }}/bin/release/stage
-      DRY_RUN: ${{ inputs.dry_run == true }}
     steps:
       - uses: actions/checkout@v4
 
@@ -50,7 +52,19 @@ jobs:
         env:
           HAVE_RELEASE_KEY: ${{ secrets.TAPPERVPN_RELEASE_KEY != '' }}
           HAVE_ANDROID_KEY: ${{ secrets.ANDROID_DEBUG_KEYSTORE != '' }}
+          DRY_INPUT: ${{ inputs.dry_run == true }}
+          BEFORE: ${{ github.event.before }}
         run: |
+          # Dry run: ticked by hand, or a push that didn't change VERSION.
+          DRY_RUN=$DRY_INPUT
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            git fetch -q --depth=1 origin "$BEFORE" 2>/dev/null || true
+            rc=0; git diff --quiet "$BEFORE" "$GITHUB_SHA" -- VERSION 2>/dev/null || rc=$?
+            [ $rc = 1 ] && DRY_RUN=false || DRY_RUN=true
+          fi
+          echo "DRY_RUN=$DRY_RUN" >> "$GITHUB_ENV"
+          echo "dry_run=$DRY_RUN" >> "$GITHUB_OUTPUT"
+          echo "Dry run: $DRY_RUN"
           v=$(tr -d '[:space:]' < VERSION)
           [[ $v =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::VERSION must look like 1.2.3, got '$v'"; exit 1; }
           if [ "$DRY_RUN" != true ] && gh release view "v$v" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
@@ -180,7 +194,7 @@ jobs:
   # build the installer from here.
   installer:
     needs: build
-    if: ${{ !inputs.dry_run }}
+    if: needs.build.outputs.dry_run != 'true'
     uses: ./.github/workflows/windows-installer.yml
     with:
       tag: ${{ needs.build.outputs.tag }}
