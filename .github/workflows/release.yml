@@ -144,7 +144,7 @@ jobs:
           gomobile bind -target android -androidapi 26 -tags not_tappervpn_go \
             -ldflags "-linkmode=external -extldflags=-Wl,-z,max-page-size=16384 -X tappervpn.com/version.longStamp=$VERSION_LONG -X tappervpn.com/version.shortStamp=$VERSION_SHORT -X tappervpn.com/version.gitCommitStamp=$VERSION_GIT_HASH -X tappervpn.com/version.extraGitCommitStamp=$VERSION_EXTRA_HASH -X tappervpn.com/updater.Version=$VERSION" \
             -o "$PWD/android/libs/libtappervpn.aar" ./libtappervpn
-          (cd android && ./gradlew --no-daemon -PcontrolURL=https://vp.tapper.co assembleDebug)
+          (cd android && bash ./gradlew --no-daemon -PcontrolURL=https://vp.tapper.co assembleDebug)
           cp android/build/outputs/apk/debug/android-debug.apk "$OUT/tappervpn-android.apk"
           rm -f ~/.android/debug.keystore
 
