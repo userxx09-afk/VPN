@@ -209,8 +209,8 @@ var
   Output: AnsiString;
 begin
   OutFile := ExpandConstant('{tmp}\signin.txt');
-  { Pass the key in a file so it doesn't show in the process list. ({tmp} is
-    removed when setup ends.) }
+  // Pass the key in a file so it doesn't show in the process list. Setup's
+  // temp folder, and the file with it, is removed when setup ends.
   KeyFile := ExpandConstant('{tmp}\authkey.txt');
   SaveStringToFile(KeyFile, AuthKey(), False);
   Params := '/c ""' + ExpandConstant('{app}\tappervpn.exe') + '" up --login-server=' + Server() +
