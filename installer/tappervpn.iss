@@ -220,8 +220,9 @@ begin
     SignedInWithKey := True
   else begin
     LoadStringFromFile(OutFile, Output);
-    SuppressibleMsgBox('Signing in with the auth key didn''t work:' + #13#10#13#10 + String(Output) +
-      #13#10 + 'You can sign in from the last page of setup instead.', mbError, MB_OK, IDOK);
+    SuppressibleMsgBox('Signing in with the auth key didn''t work:' + #13#10#13#10 +
+      String(Output) + #13#10 + 'You can sign in from the last page of setup instead.',
+      mbError, MB_OK, IDOK);
   end;
 end;
 
