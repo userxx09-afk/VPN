@@ -5,8 +5,9 @@
 #
 # Runs when a release is published (scripts\release.ps1 -Publish), or by hand:
 # Actions > Windows installer > Run workflow (tag, or empty for the latest).
-# On pull requests that touch the installer it builds from the latest release
-# and keeps the .exe as a workflow artifact instead of attaching it.
+# On pull requests and pushes to main that touch the installer or the app it
+# builds from the latest release and keeps the .exe as a workflow artifact
+# instead of attaching it.
 name: Windows installer
 
 on:
@@ -20,6 +21,13 @@ on:
   pull_request:
     paths:
       - installer/**
+      - tappervpn/cmd/tappervpn-gui/**
+      - .github/workflows/windows-installer.yml
+  push:
+    branches: [main]
+    paths:
+      - installer/**
+      - tappervpn/cmd/tappervpn-gui/**
       - .github/workflows/windows-installer.yml
 
 permissions:
@@ -66,6 +74,21 @@ jobs:
           $got = (Get-FileHash dl\tappervpn-windows-amd64.zip -Algorithm SHA256).Hash
           if ($got -ne $want) { throw "zip hash $got doesn't match SHA256SUMS ($want)" }
           Expand-Archive dl\tappervpn-windows-amd64.zip installer\payload
+
+      - name: Build the TapperVPN app if the release doesn't have it
+        shell: pwsh
+        run: |
+          # Releases from 0.2.5 on carry tappervpn-gui.exe in the signed zip. For
+          # older ones, build it from this commit; the updater keeps it current
+          # with each new release after that.
+          if (-not (Test-Path installer\payload\tappervpn-gui.exe)) {
+            Push-Location tappervpn
+            $env:GOOS = "windows"; $env:GOARCH = "amd64"; $env:CGO_ENABLED = "0"
+            go build -trimpath -ldflags "-s -w -H windowsgui -X tappervpn.com/updater.Version=$env:VERSION" `
+              -o ..\installer\payload\tappervpn-gui.exe ./cmd/tappervpn-gui
+            if ($LASTEXITCODE) { throw "building tappervpn-gui.exe failed" }
+            Pop-Location
+          }
           Get-ChildItem installer\payload
 
       - name: Build TapperVPN-Setup.exe
@@ -86,6 +109,6 @@ jobs:
           path: dist/TapperVPN-Setup.exe
 
       - name: Attach to the release
-        if: github.event_name != 'pull_request'
+        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
         shell: pwsh
         run: gh release upload $env:TAG dist\TapperVPN-Setup.exe --repo $env:GITHUB_REPOSITORY --clobber

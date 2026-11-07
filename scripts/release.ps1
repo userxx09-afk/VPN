@@ -37,11 +37,11 @@ $ldflags = "-s -w -X tappervpn.com/updater.Version=$version " +
     "-X tappervpn.com/version.shortStamp=$engine " +
     "-X tappervpn.com/version.gitCommitStamp=$commit"
 
-function GoBuild($dir, $goos, $outFile, $pkg) {
+function GoBuild($dir, $goos, $outFile, $pkg, $extraLdflags = "") {
     $env:GOOS = $goos; $env:GOARCH = "amd64"; $env:CGO_ENABLED = "0"
     Push-Location $dir
     try {
-        & go build -trimpath -ldflags $ldflags -o $outFile $pkg
+        & go build -trimpath -ldflags "$ldflags $extraLdflags".Trim() -o $outFile $pkg
         if ($LASTEXITCODE) { throw "go build $pkg ($goos) failed" }
     } finally {
         Pop-Location
@@ -55,6 +55,9 @@ Write-Host "== TapperVPN $version"
 foreach ($cmd in "tappervpn", "tappervpnd", "tappervpn-updater") {
     GoBuild "$root\tappervpn" "windows" "$stage\windows\$cmd.exe" "./cmd/$cmd"
 }
+# The TapperVPN app (window + taskbar icon), a GUI exe. The updater replaces it like
+# every file in the zip; the running app restarts itself from the new file.
+GoBuild "$root\tappervpn" "windows" "$stage\windows\tappervpn-gui.exe" "./cmd/tappervpn-gui" "-H windowsgui"
 # wintun.dll: WireGuard LLC's signed tunnel driver, redistributable unmodified.
 $wintunHash = "E5DA8447DC2C320EDC0FC52FA01885C103DE8C118481F683643CACC3220DAFCE"
 $wintun = "$root\bin\wintun.dll"

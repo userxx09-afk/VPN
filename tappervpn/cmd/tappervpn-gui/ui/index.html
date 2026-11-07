@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TapperVPN</title>
+<link rel="icon" href="icon.png">
+<style>
+  :root {
+    --bg: #000; --card: #0d0f0d; --line: #1d241d; --text: #e9f2e9; --dim: #8b978b;
+    --green: #39ff14; --green-dim: #1f6b2e; --amber: #ffb300; --cyan: #00e5ff; --red: #ff5a5a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.4 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; }
+  body { padding: 0 0 24px; }
+  button, input { font: inherit; color: inherit; }
+  header { position: sticky; top: 0; z-index: 2; background: var(--bg);
+    display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+  header img { width: 40px; height: 40px; border-radius: 9px; }
+  header .t { flex: 1; min-width: 0; }
+  header h1 { font-size: 18px; margin: 0; font-weight: 600; letter-spacing: .2px; }
+  .sub { color: var(--dim); font-size: 13px; }
+  .sub.on { color: var(--green); } .sub.wait { color: var(--amber); } .sub.exit { color: var(--cyan); }
+  main { padding: 12px 12px 0; display: grid; gap: 12px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  .card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .8px; color: var(--dim);
+    margin: 0; padding: 12px 14px 6px; font-weight: 600; }
+  .row { display: flex; align-items: center; gap: 10px; padding: 10px 14px; min-height: 48px; }
+  .row + .row { border-top: 1px solid var(--line); }
+  .row .grow { flex: 1; min-width: 0; }
+  .row .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .meta { color: var(--dim); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mono { font-family: "Cascadia Mono", Consolas, monospace; }
+  .click { cursor: pointer; } .click:hover { background: #121812; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: #4a524a; flex: none; }
+  .dot.on { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .badge { font-size: 11px; color: var(--cyan); border: 1px solid #0b5560; border-radius: 6px; padding: 0 6px; }
+  .btn { background: #142014; border: 1px solid var(--green-dim); color: var(--green); border-radius: 8px;
+    padding: 7px 12px; cursor: pointer; white-space: nowrap; }
+  .btn:hover { background: #1a2d1a; } .btn:disabled { opacity: .45; cursor: default; }
+  .btn.primary { background: var(--green); color: #000; border-color: var(--green); font-weight: 600; }
+  .btn.danger { color: var(--red); border-color: #5a2222; background: #1d0e0e; }
+  .btn.small { padding: 3px 9px; font-size: 12.5px; }
+  .icon-btn { background: none; border: 1px solid transparent; border-radius: 6px; color: var(--dim); cursor: pointer; padding: 3px 7px; }
+  .icon-btn:hover { border-color: var(--line); color: var(--text); }
+  /* switch */
+  .sw { position: relative; width: 52px; height: 30px; flex: none; }
+  .sw input { opacity: 0; width: 0; height: 0; }
+  .sw span { position: absolute; inset: 0; background: #2a312a; border-radius: 30px; transition: .2s; cursor: pointer; }
+  .sw span::before { content: ""; position: absolute; width: 24px; height: 24px; left: 3px; top: 3px;
+    background: #cfd8cf; border-radius: 50%; transition: .2s; }
+  .sw input:checked + span { background: var(--green-dim); }
+  .sw input:checked + span::before { transform: translateX(22px); background: var(--green); }
+  .sw input:disabled + span { opacity: .45; cursor: default; }
+  .sw.sm { width: 42px; height: 24px; } .sw.sm span::before { width: 18px; height: 18px; }
+  .sw.sm input:checked + span::before { transform: translateX(18px); }
+  /* radio list */
+  .radio { width: 18px; height: 18px; border-radius: 50%; border: 2px solid #4a524a; flex: none; }
+  .radio.sel { border-color: var(--cyan); background: radial-gradient(var(--cyan) 45%, transparent 50%); }
+  .radio.sel.none { border-color: var(--green); background: radial-gradient(var(--green) 45%, transparent 50%); }
+  .dis { opacity: .5; cursor: default !important; }
+  input[type=text], input[type=password], input[type=search] {
+    width: 100%; background: #070907; border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; outline: none; }
+  input:focus { border-color: var(--green-dim); }
+  label.f { display: block; padding: 6px 14px 0; color: var(--dim); font-size: 12.5px; }
+  .pad { padding: 8px 14px 14px; }
+  .banner { border-radius: 10px; padding: 10px 12px; font-size: 13px; }
+  .banner.err { background: #220e0e; border: 1px solid #5a2222; color: #ffc9c9; }
+  .banner.warn { background: #221a06; border: 1px solid #5c4710; color: #ffe2a3; }
+  .banner.info { background: #0b1a1c; border: 1px solid #0b5560; color: #bff6ff; }
+  .muted { color: var(--dim); font-size: 12.5px; }
+  .toast { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); background: #1b2a1b;
+    border: 1px solid var(--green-dim); color: var(--green); padding: 8px 14px; border-radius: 20px;
+    opacity: 0; transition: opacity .2s; pointer-events: none; }
+  .toast.show { opacity: 1; }
+  .hidden { display: none !important; }
+  code { background: #070907; border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <img src="icon.png" alt="">
+  <div class="t">
+    <h1>TapperVPN</h1>
+    <div id="sub" class="sub">Loading…</div>
+  </div>
+  <label class="sw" title="Connect / disconnect"><input type="checkbox" id="power"><span></span></label>
+</header>
+<main id="main"></main>
+<div id="toast" class="toast"></div>
+
+<script>
+"use strict";
+const token = location.pathname.split("/")[2];
+let m = null, filter = "", signInDraft = null;
+
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+async function api(path, body) {
+  try {
+    const r = await fetch("/api/" + path, {
+      method: "POST",
+      headers: {"Content-Type": "application/json", "X-TapperVPN-Token": token},
+      body: JSON.stringify(body || {}),
+    });
+    return r.ok;
+  } catch (e) { return false; }
+}
+
+function toast(text) {
+  const t = $("#toast");
+  t.textContent = text; t.classList.add("show");
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => t.classList.remove("show"), 1600);
+}
+async function copy(text) {
+  try { await navigator.clipboard.writeText(text); toast("Copied " + text); }
+  catch (e) { toast("Couldn't copy"); }
+}
+
+function signedOut() {
+  return !m.serviceErr && (m.state === "NeedsLogin" || (m.state === "NoState" && !m.loggedIn));
+}
+
+function header() {
+  const sub = $("#sub"), power = $("#power");
+  let text = "Disconnected", cls = "";
+  const running = m.state === "Running";
+  if (m.serviceErr) text = "Service isn't running";
+  else if (signedOut()) text = m.authURL ? "Waiting for approval" : "Not signed in";
+  else if (running && m.exit) { text = m.exit.online ? "Connected via " + m.exit.name : "Exit node " + m.exit.name + " is offline"; cls = m.exit.online ? "exit" : "wait"; }
+  else if (running) { text = "Connected"; cls = "on"; }
+  else if (m.state === "Starting") { text = "Connecting…"; cls = "wait"; }
+  if (m.busy) { text = m.busy + "…"; cls = "wait"; }
+  sub.textContent = text; sub.className = "sub " + cls;
+  power.checked = running || m.state === "Starting";
+  power.disabled = !!m.serviceErr || signedOut() || !!m.busy;
+}
+
+function devRow(d, opts = {}) {
+  const meta = [d.ip, d.os, d.online ? "" : (d.lastSeen ? "last seen " + d.lastSeen : "offline")].filter(Boolean).join(" · ");
+  return `<div class="row click" data-copy="${esc(d.ip)}" title="Click to copy ${esc(d.ip)}">
+    <span class="dot ${d.online ? "on" : ""}"></span>
+    <div class="grow"><div class="name">${esc(d.name)} ${d.exitNode && !opts.self ? '<span class="badge">exit node</span>' : ""}</div>
+    <div class="meta mono">${esc(meta)}</div></div>
+    <button class="icon-btn" data-copy="${esc(d.ip)}" title="Copy address">Copy</button></div>`;
+}
+
+function render() {
+  if (!m) return;
+  header();
+  const out = [];
+  if (m.error) out.push(`<div class="banner err">${esc(m.error)}</div>`);
+  if (m.serviceErr) {
+    out.push(`<div class="banner err">${esc(m.serviceErr)}</div>`);
+  } else if (signedOut()) {
+    out.push(signInCard());
+  } else {
+    const health = (m.health || []).filter((h) => !/unstable version/i.test(h));
+    for (const h of health) out.push(`<div class="banner warn">${esc(h)}</div>`);
+    if (m.self) out.push(`<section class="card"><h2>This PC</h2>${devRow(m.self, {self: true})}
+      ${m.self.dnsName ? `<div class="row click" data-copy="${esc(m.self.dnsName)}"><div class="grow"><div class="meta">Name on the VPN</div><div class="mono">${esc(m.self.dnsName)}</div></div><button class="icon-btn" data-copy="${esc(m.self.dnsName)}">Copy</button></div>` : ""}</section>`);
+    out.push(exitCard());
+    out.push(devicesCard());
+  }
+  out.push(settingsCard());
+  // Keep focus and caret in the search box across redraws.
+  const act = document.activeElement, id = act && act.id, pos = act && act.selectionStart;
+  saveDraft(); // keep what's typed in the sign-in form
+  $("#main").innerHTML = out.join("");
+  restoreDraft();
+  if (id) { const el = document.getElementById(id); if (el) { el.focus(); try { el.setSelectionRange(pos, pos); } catch (e) {} } }
+}
+
+function saveDraft() {
+  const s = $("#server"), k = $("#authkey");
+  if (s) signInDraft = {server: s.value, key: k ? k.value : ""};
+}
+function restoreDraft() {
+  const s = $("#server"), k = $("#authkey");
+  if (s && signInDraft) { s.value = signInDraft.server; k.value = signInDraft.key; }
+}
+
+function signInCard() {
+  const waiting = m.authURL ? `<div class="banner info" style="margin:0 14px 12px">
+      This PC is waiting to be approved. The approval page opened in your browser; approve it on the server, e.g.
+      <code>sudo headscale nodes register --key …</code> (the page shows the full command).
+      <div style="margin-top:8px"><button class="btn small" data-open="auth">Open approval page</button></div></div>` : "";
+  return `<section class="card"><h2>Sign in</h2>
+    <div class="pad muted" style="padding-bottom:0">Connect this PC to your TapperVPN network.</div>
+    <label class="f" for="server">Server</label>
+    <div class="pad" style="padding-top:4px;padding-bottom:4px"><input type="text" id="server" value="${esc(m.controlURL || m.defaultURL)}" spellcheck="false"></div>
+    <label class="f" for="authkey">Auth key (optional)</label>
+    <div class="pad" style="padding-top:4px"><input type="password" id="authkey" placeholder="tskey-… / leave empty to approve on the server" spellcheck="false">
+    <div class="muted" style="margin-top:6px">Make a key on the server with <code>sudo headscale preauthkeys create --user admin --expiration 1h</code>, or leave it empty and approve this PC after signing in.</div></div>
+    ${waiting}
+    <div class="pad" style="padding-top:0"><button class="btn primary" id="signin" ${m.busy ? "disabled" : ""}>Sign in</button></div></section>`;
+}
+
+function exitCard() {
+  const exits = m.devices.filter((d) => d.exitNode);
+  const cur = m.exit ? m.exit.id : "";
+  const rows = [`<div class="row click" data-exit="">
+      <span class="radio none ${cur ? "" : "sel"}"></span>
+      <div class="grow"><div class="name">None</div><div class="meta">Use this PC's own internet connection</div></div></div>`];
+  for (const d of exits) {
+    const dis = !d.online && d.id !== cur;
+    rows.push(`<div class="row click ${dis ? "dis" : ""}" ${dis ? "" : `data-exit="${esc(d.id)}"`}>
+      <span class="radio ${d.id === cur ? "sel" : ""}"></span>
+      <div class="grow"><div class="name">${esc(d.name)}</div><div class="meta">${d.online ? "Send internet traffic through " + esc(d.name) : "offline"}</div></div></div>`);
+  }
+  if (!exits.length) rows.push(`<div class="row"><div class="muted">No device offers an exit node.</div></div>`);
+  rows.push(`<div class="row"><div class="grow"><div class="name" style="font-weight:500">Allow local network access</div>
+      <div class="meta">Reach printers and other LAN devices while using an exit node</div></div>
+      <label class="sw sm"><input type="checkbox" id="lan" ${m.allowLAN ? "checked" : ""}><span></span></label></div>`);
+  return `<section class="card"><h2>Exit node</h2>${rows.join("")}</section>`;
+}
+
+function devicesCard() {
+  const f = filter.trim().toLowerCase();
+  const list = m.devices.filter((d) => !f || (d.name + " " + d.ip + " " + d.os + " " + d.dnsName).toLowerCase().includes(f));
+  const online = m.devices.filter((d) => d.online).length;
+  return `<section class="card"><h2>Devices · ${online} of ${m.devices.length} online</h2>
+    <div class="pad" style="padding-top:2px;padding-bottom:6px"><input type="search" id="search" placeholder="Search devices" value="${esc(filter)}"></div>
+    ${list.map((d) => devRow(d)).join("") || '<div class="row"><div class="muted">No devices.</div></div>'}</section>`;
+}
+
+function settingsCard() {
+  const u = m.update || {};
+  let upd;
+  if (u.checking) upd = "Checking for updates…";
+  else if (u.started) upd = "Installing the update. TapperVPN reconnects in a moment.";
+  else if (u.available) upd = `Version ${esc(u.latest)} is available.`;
+  else if (u.err) upd = "Couldn't check for updates: " + esc(u.err);
+  else if (u.checked) upd = `You have the latest version.`;
+  else upd = "";
+  const updBtn = u.available && !u.started
+    ? `<button class="btn primary small" id="install">Install update</button>`
+    : `<button class="btn small" id="check" ${u.checking ? "disabled" : ""}>Check for updates</button>`;
+  const signedIn = !m.serviceErr && !signedOut();
+  return `<section class="card"><h2>Settings</h2>
+    <div class="row click" data-open="admin"><div class="grow"><div class="name" style="font-weight:500">Admin page</div><div class="meta mono">${esc(m.adminURL)}</div></div><span class="muted">Open ↗</span></div>
+    ${signedIn ? `<div class="row"><div class="grow"><div class="name" style="font-weight:500">Server</div><div class="meta mono">${esc(m.controlURL)}</div></div>
+      <button class="btn danger small" id="signout">Sign out</button></div>` : ""}
+    <div class="row"><div class="grow"><div class="name" style="font-weight:500">TapperVPN ${esc(m.version)}</div><div class="meta">${upd}</div></div>${updBtn}</div>
+    </section>`;
+}
+
+document.addEventListener("click", async (e) => {
+  const t = e.target.closest("[data-copy],[data-exit],[data-open],#signin,#signout,#check,#install");
+  if (!t) return;
+  if (t.dataset.copy !== undefined) { e.stopPropagation(); if (t.dataset.copy) copy(t.dataset.copy); return; }
+  if (t.dataset.exit !== undefined) { api("exit-node", {id: t.dataset.exit}); return; }
+  if (t.dataset.open) { api("open", {id: t.dataset.open}); return; }
+  switch (t.id) {
+    case "signin": api("sign-in", {server: $("#server").value, key: $("#authkey").value}); signInDraft = null; break;
+    case "signout": if (confirm("Sign this PC out of TapperVPN? You'll need to sign in (and be approved) again.")) api("sign-out"); break;
+    case "check": api("update/check"); break;
+    case "install": api("update/install"); break;
+  }
+});
+document.addEventListener("change", (e) => {
+  if (e.target.id === "power") api("running", {on: e.target.checked});
+  if (e.target.id === "lan") api("allow-lan", {on: e.target.checked});
+});
+document.addEventListener("input", (e) => {
+  if (e.target.id === "search") { filter = e.target.value; render(); }
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && (e.target.id === "server" || e.target.id === "authkey")) $("#signin").click();
+});
+
+function connect() {
+  const es = new EventSource("/api/events?token=" + encodeURIComponent(token));
+  es.onmessage = (ev) => { m = JSON.parse(ev.data); render(); };
+  es.onerror = () => {
+    es.close();
+    $("#sub").textContent = "TapperVPN app isn't running";
+    setTimeout(connect, 3000);
+  };
+}
+connect();
+</script>
+</body>
+</html>

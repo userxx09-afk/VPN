@@ -86,9 +86,15 @@ installed one.
 - **Windows**: download and run
   [TapperVPN-Setup.exe](https://github.com/userxx09-afk/VPN/releases/latest/download/TapperVPN-Setup.exe).
   It installs to `C:\Program Files\TapperVPN` (added to PATH), adds the
-  `TapperVPN` service and the `TapperVPN Update` task, and signs the PC in:
-  with an auth key if you give one, otherwise a window shows the sign-in
-  request to approve on the server. Uninstall from Settings > Apps.
+  `TapperVPN` service and the `TapperVPN Update` task, and opens the
+  **TapperVPN app** (`tappervpn-gui.exe`, `tappervpn/cmd/tappervpn-gui`):
+  the Windows version of the Android app. It signs the PC in (server, and an
+  auth key or approval on the server), connects and disconnects, picks the
+  exit node, lists the devices with copyable VPN addresses, opens the admin
+  page, and checks for and installs updates. It lives in the taskbar's
+  notification area (started at every Windows sign-in; left click opens the
+  window, right click has quick controls) and in the Start menu.
+  Uninstall from Settings > Apps.
   Silent: `TapperVPN-Setup.exe /VERYSILENT /AUTHKEY=<key>`.
   The installer is built by `.github/workflows/windows-installer.yml` from
   `installer/tappervpn.iss` whenever a release is published (it checks the
@@ -130,7 +136,8 @@ installed one.
 
 ## Roadmap
 
-1. **Own UI**: Windows tray app for choosing the gateway and app list.
+1. **Own UI**: the Windows app (`cmd/tappervpn-gui`) does sign-in, connect,
+   exit node and devices; still to add there: the per-app routing app list.
 2. **macOS**: `NETransparentProxyProvider` system extension.
 3. **iOS**: full-tunnel or domain-based only. Per-app VPN needs MDM; iOS cannot be a gateway.
 4. **Logo in the web client**: its icons come from Tailscale's prebuilt web UI package; building our own web UI would let it use the TapperVPN logo too.

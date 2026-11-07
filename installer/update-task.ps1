@@ -1,7 +1,8 @@
 # Adds or removes the "TapperVPN Update" scheduled task. The Windows
 # installer (installer/tappervpn.iss) runs this from the install folder:
 #
-#   update-task.ps1 -Install      # daily signed-update check as SYSTEM
+#   update-task.ps1 -Install      # daily signed-update check as SYSTEM;
+#                                 # signed-in users may start it
 #   update-task.ps1 -Uninstall
 param([switch]$Install, [switch]$Uninstall)
 $ErrorActionPreference = "Stop"
@@ -23,3 +24,14 @@ $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAv
     -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
 Register-ScheduledTask -TaskName $task -Action $action -Trigger $daily, $boot -Settings $settings `
     -User "SYSTEM" -RunLevel Highest -Force | Out-Null
+
+# Let any signed-in user start the task (the TapperVPN app's "Install
+# update" button runs it). It still runs as SYSTEM and only installs
+# releases signed with the TapperVPN release key.
+$svc = New-Object -ComObject Schedule.Service
+$svc.Connect()
+$t = $svc.GetFolder("\").GetTask($task)
+$sd = $t.GetSecurityDescriptor(4)  # DACL
+if ($sd -notmatch '\(A;;GRGX;;;AU\)') {
+    $t.SetSecurityDescriptor($sd + "(A;;GRGX;;;AU)", 0)
+}

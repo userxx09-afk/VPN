@@ -7,16 +7,20 @@
 ;
 ;   iscc /DAppVersion=0.2.4 installer\tappervpn.iss     -> dist\TapperVPN-Setup.exe
 ;
-; What it does (the same as the old scripts\install-windows.ps1):
+; What it does:
 ;   - copies the files to C:\Program Files\TapperVPN and adds it to PATH
 ;   - adds and starts the TapperVPN service (starts with Windows)
-;   - adds the "TapperVPN Update" task (daily signed updates from GitHub)
-;   - signs the PC in, with an auth key or by approving it on the server
-; Uninstalling removes the service, task and PATH entry. The device's
+;   - adds the "TapperVPN Update" task (daily signed updates from GitHub;
+;     any user can start it from the app's "Install update" button)
+;   - adds the TapperVPN app (tappervpn-gui.exe): Start menu entry, and the
+;     taskbar icon at every Windows sign-in
+;   - opens the app, where the PC signs in (server, optional auth key) like
+;     the Android app
+; Uninstalling removes the service, task, app, and PATH entry. The device's
 ; identity in C:\ProgramData\TapperVPN is kept, so reinstalling doesn't
 ; need a new sign-in.
 ;
-; Silent install (e.g. for remote setup):
+; Silent install (e.g. for remote setup), signing in with an auth key:
 ;   TapperVPN-Setup.exe /VERYSILENT /AUTHKEY=<key> [/SERVER=<url>]
 
 #ifndef AppVersion
@@ -60,11 +64,20 @@ CloseApplications=no
 Source: "{#Payload}\tappervpn.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Payload}\tappervpnd.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Payload}\tappervpn-updater.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Payload}\tappervpn-gui.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Payload}\wintun.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "update-task.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "tappervpn.ico"; DestDir: "{app}"; Flags: ignoreversion
 
+[Icons]
+Name: "{autoprograms}\TapperVPN"; Filename: "{app}\tappervpn-gui.exe"; IconFilename: "{app}\tappervpn.ico"; Comment: "Connect, pick an exit node, see your devices"
+
+[Registry]
+; The app's taskbar icon starts when anyone signs in to Windows.
+Root: HKLM64; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "TapperVPN"; ValueData: """{app}\tappervpn-gui.exe"" -background"; Flags: uninsdeletevalue
+
 [UninstallRun]
+Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM tappervpn-gui.exe"; Flags: runhidden waituntilterminated; RunOnceId: "StopApp"
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\update-task.ps1"" -Uninstall"; Flags: runhidden waituntilterminated; RunOnceId: "RemoveUpdateTask"
 Filename: "{app}\tappervpnd.exe"; Parameters: "uninstall-system-daemon"; Flags: runhidden waituntilterminated; RunOnceId: "RemoveService"
 
@@ -73,18 +86,16 @@ Filename: "{app}\tappervpnd.exe"; Parameters: "uninstall-system-daemon"; Flags: 
 Type: files; Name: "{app}\*.old"
 
 [Run]
-Filename: "{cmd}"; Parameters: "{code:SignInParams}"; Description: "Sign this PC in to TapperVPN now"; Flags: postinstall nowait skipifsilent; Check: OfferSignIn
+; Open the app for the user who ran setup: it shows the sign-in on a new
+; install, and the connection on an upgrade. Silent installs start just the icon.
+Filename: "{app}\tappervpn-gui.exe"; Description: "Open TapperVPN"; Flags: postinstall nowait runasoriginaluser; Check: not WizardSilent
+Filename: "{app}\tappervpn-gui.exe"; Parameters: "-background"; Flags: nowait runasoriginaluser; Check: WizardSilent
 
 [Code]
 const
   ServiceName = 'TapperVPN';
   DefaultServer = 'https://vp.tapper.co';
   EnvKey = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment';
-
-var
-  SignInPage: TInputQueryWizardPage;
-  WasInstalled: Boolean;
-  SignedInWithKey: Boolean;
 
 function Run(Exe, Params: String): Integer;
 var
@@ -101,16 +112,15 @@ begin
   Result := Run(ExpandConstant('{sys}\sc.exe'), 'query ' + ServiceName) = 0;
 end;
 
+{ /SERVER= and /AUTHKEY= on the command line, for silent installs. }
 function Server(): String;
 begin
-  Result := Trim(SignInPage.Values[0]);
-  if Result = '' then
-    Result := DefaultServer;
+  Result := Trim(ExpandConstant('{param:SERVER|' + DefaultServer + '}'));
 end;
 
 function AuthKey(): String;
 begin
-  Result := Trim(SignInPage.Values[1]);
+  Result := Trim(ExpandConstant('{param:AUTHKEY|}'));
 end;
 
 { --- PATH --- }
@@ -143,51 +153,13 @@ begin
   RegWriteExpandStringValue(HKLM, EnvKey, 'Path', Copy(P, 2, Length(P) - 2));
 end;
 
-{ --- Wizard --- }
-
-procedure InitializeWizard();
-begin
-  WasInstalled := RegKeyExists(HKLM64,
-    'Software\Microsoft\Windows\CurrentVersion\Uninstall\{{#AppGuid}}_is1');
-
-  SignInPage := CreateInputQueryPage(wpWelcome,
-    'Sign in', 'Connect this PC to your TapperVPN network.',
-    'With an auth key, the PC joins by itself. Make one on the server with:' + #13#10 +
-    '    sudo headscale preauthkeys create --user admin --expiration 1h' + #13#10#13#10 +
-    'Or leave the key empty: after setup, a window shows a sign-in request ' +
-    'to approve on the server (sudo headscale auth register ...).');
-  SignInPage.Add('Control server:', False);
-  SignInPage.Add('Auth key (optional):', True);
-  SignInPage.Values[0] := ExpandConstant('{param:SERVER|' + DefaultServer + '}');
-  SignInPage.Values[1] := ExpandConstant('{param:AUTHKEY|}');
-end;
-
-function ShouldSkipPage(PageID: Integer): Boolean;
-begin
-  { An upgrade keeps the existing sign-in. }
-  Result := (PageID = SignInPage.ID) and WasInstalled;
-end;
-
-function NextButtonClick(CurPageID: Integer): Boolean;
-var
-  S: String;
-begin
-  Result := True;
-  if CurPageID = SignInPage.ID then begin
-    S := Lowercase(Server());
-    if (Pos('https://', S) <> 1) and (Pos('http://', S) <> 1) then begin
-      MsgBox('The control server must start with https:// or http://', mbError, MB_OK);
-      Result := False;
-    end;
-  end;
-end;
-
 { --- Install --- }
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   Result := '';
-  { Stop a running copy so its files can be replaced. }
+  { Stop running copies so their files can be replaced. }
+  Run(ExpandConstant('{sys}\taskkill.exe'), '/F /IM tappervpn-gui.exe');
   if ServiceExists() then
     Run(ExpandConstant('{sys}\net.exe'), 'stop ' + ServiceName);
 end;
@@ -216,12 +188,10 @@ begin
   Params := '/c ""' + ExpandConstant('{app}\tappervpn.exe') + '" up --login-server=' + Server() +
     ' "--auth-key=file:' + KeyFile + '" --unattended --timeout=90s > "' + OutFile + '" 2>&1"';
   WizardForm.StatusLabel.Caption := 'Signing in to ' + Server() + '...';
-  if Run(ExpandConstant('{cmd}'), Params) = 0 then
-    SignedInWithKey := True
-  else begin
+  if Run(ExpandConstant('{cmd}'), Params) <> 0 then begin
     LoadStringFromFile(OutFile, Output);
     SuppressibleMsgBox('Signing in with the auth key didn''t work:' + #13#10#13#10 +
-      String(Output) + #13#10 + 'You can sign in from the last page of setup instead.',
+      String(Output) + #13#10 + 'Sign in from the TapperVPN app instead.',
       mbError, MB_OK, IDOK);
   end;
 end;
@@ -254,20 +224,6 @@ begin
     WaitForDaemon();
     SignInWithKey();
   end;
-end;
-
-{ Finish page: open a window that runs `tappervpn up` and shows the sign-in
-  request to approve on the server. }
-function OfferSignIn(): Boolean;
-begin
-  Result := (not WasInstalled) and (not SignedInWithKey);
-end;
-
-function SignInParams(Param: String): String;
-begin
-  Result := '/k "title TapperVPN sign-in & echo Approve this PC on the server with the headscale command' +
-    ' shown at the link below (sudo headscale auth register ...). & echo. & "' +
-    ExpandConstant('{app}\tappervpn.exe') + '" up --login-server=' + Server() + ' --unattended"';
 end;
 
 { --- Uninstall --- }
