@@ -60,10 +60,24 @@ cd ../headscale && go build -o ../bin/ ./cmd/headscale
 
 ## Releases and auto-update
 
-The version lives in `VERSION`. To release: bump it, commit, then run
-`scripts\release.ps1 -Publish` (with `$env:GITHUB_TOKEN` set). It builds every
-platform, writes `SHA256SUMS`, signs it with the release key, and publishes a
-GitHub release with these files:
+The version lives in `VERSION`. To release: put the new version in it and push
+to `main`. GitHub (`.github/workflows/release.yml`) then builds every platform,
+writes `SHA256SUMS`, signs it with the release key, publishes the release, and
+builds `TapperVPN-Setup.exe` for it. Actions > Release > Run workflow does the
+same for whatever `VERSION` says; tick "dry run" to build without signing or
+publishing. It uses two repository secrets, added once from the PC that has
+the keys (Settings > Secrets and variables > Actions):
+
+| Secret | Value (PowerShell, copies it to the clipboard) |
+|---|---|
+| `TAPPERVPN_RELEASE_KEY` | `Get-Content $env:USERPROFILE\.tappervpn\release.key -Raw \| Set-Clipboard` |
+| `ANDROID_DEBUG_KEYSTORE` | `[Convert]::ToBase64String([IO.File]::ReadAllBytes("$env:USERPROFILE\.android\debug.keystore")) \| Set-Clipboard` |
+
+Anyone who can push workflow changes to this repo can use these secrets, so
+keep write access to people you trust. `scripts\release.ps1 -Publish` (with
+`$env:GITHUB_TOKEN` set) still does the same from that PC.
+
+A release has these files:
 
 | File | Installed by |
 |---|---|

@@ -3,7 +3,8 @@
 # installer is always at
 #   https://github.com/userxx09-afk/VPN/releases/latest/download/TapperVPN-Setup.exe
 #
-# Runs when a release is published (scripts\release.ps1 -Publish), or by hand:
+# Runs after release.yml publishes a release, when a release is published
+# some other way (scripts\release.ps1 -Publish), or by hand:
 # Actions > Windows installer > Run workflow (tag, or empty for the latest).
 # On pull requests and pushes to main that touch the installer or the app it
 # builds from the latest release and keeps the .exe as a workflow artifact
@@ -18,6 +19,15 @@ on:
       tag:
         description: Release tag (e.g. v0.2.4); empty for the latest release
         required: false
+  # From release.yml, right after it publishes a release.
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: true
+      attach:
+        type: boolean
+        default: false
   pull_request:
     paths:
       - installer/**
@@ -109,6 +119,6 @@ jobs:
           path: dist/TapperVPN-Setup.exe
 
       - name: Attach to the release
-        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+        if: inputs.attach || github.event_name == 'release' || github.event_name == 'workflow_dispatch'
         shell: pwsh
         run: gh release upload $env:TAG dist\TapperVPN-Setup.exe --repo $env:GITHUB_REPOSITORY --clobber

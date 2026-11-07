@@ -1,6 +1,10 @@
 # Builds, signs and publishes a TapperVPN release. Every device updates from
 # the release this makes (github.com/userxx09-afk/VPN/releases).
 #
+# Usually you don't need this: pushing a new VERSION to main makes GitHub do
+# the same (.github/workflows/release.yml). This is for releasing from the PC
+# that has the keys. Keep the two in step when changing what a release holds.
+#
 #   1. Put the new version in VERSION (e.g. 0.3.0) and commit.
 #   2. scripts\release.ps1                 # build + sign into bin\release\<version>
 #      scripts\release.ps1 -Publish        # ...and upload it as a GitHub release
