@@ -146,12 +146,21 @@ jobs:
           grep -q "meshwall patch" "$RUNNER_TEMP/go-android/src/runtime/os_linux32.go"
           export GOROOT="$RUNNER_TEMP/go-android" GOTOOLCHAIN=local
           export PATH="$GOROOT/bin:$PATH"
-          # The debug key every installed app was signed with.
-          # (A dry run lets Gradle make a throwaway one.)
+          # The key every installed app is signed with. Android only installs an
+          # update signed with the same key, so it's handed to Gradle explicitly:
+          # left to itself, Gradle on this runner makes a new throwaway key each
+          # build (that broke updates in 0.2.5-0.2.8). A dry run uses a throwaway.
+          KS="$RUNNER_TEMP/android-signing.keystore"
           if [ "$DRY_RUN" != true ]; then
-            mkdir -p ~/.android
-            echo "$ANDROID_DEBUG_KEYSTORE" | base64 -d > ~/.android/debug.keystore
+            echo "$ANDROID_DEBUG_KEYSTORE" | base64 -d > "$KS"
+          else
+            keytool -genkeypair -keystore "$KS" -storepass android -keypass android -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 30 -dname "CN=dry run" >/dev/null 2>&1
           fi
+          export ANDROID_USER_HOME="$RUNNER_TEMP/android-user-home"
+          mkdir -p "$ANDROID_USER_HOME" && cp "$KS" "$ANDROID_USER_HOME/debug.keystore"
+          SIGN="-Pandroid.injected.signing.store.file=$KS -Pandroid.injected.signing.store.password=android -Pandroid.injected.signing.key.alias=androiddebugkey -Pandroid.injected.signing.key.password=android"
+          WANT=$(keytool -list -v -keystore "$KS" -storepass android -alias androiddebugkey | sed -n 's/^.*SHA256: //p' | tr -d ':' | tr 'A-F' 'a-f')
           cd tappervpn-android
           engine=$(tr -d '[:space:]' < ../tappervpn/VERSION.txt)
           TS_VERSION_LONG="$engine-t${GITHUB_SHA::9}" TS_VERSION_GIT_HASH="$GITHUB_SHA" \
@@ -163,9 +172,14 @@ jobs:
           gomobile bind -target android -androidapi 26 -tags not_tappervpn_go \
             -ldflags "-linkmode=external -extldflags=-Wl,-z,max-page-size=16384 -X tappervpn.com/version.longStamp=$VERSION_LONG -X tappervpn.com/version.shortStamp=$VERSION_SHORT -X tappervpn.com/version.gitCommitStamp=$VERSION_GIT_HASH -X tappervpn.com/version.extraGitCommitStamp=$VERSION_EXTRA_HASH -X tappervpn.com/updater.Version=$VERSION" \
             -o "$PWD/android/libs/libtappervpn.aar" ./libtappervpn
-          (cd android && bash ./gradlew --no-daemon -PcontrolURL=https://vp.tapper.co assembleDebug)
-          cp android/build/outputs/apk/debug/android-debug.apk "$OUT/tappervpn-android.apk"
-          rm -f ~/.android/debug.keystore
+          (cd android && bash ./gradlew --no-daemon -PcontrolURL=https://vp.tapper.co $SIGN assembleDebug)
+          APK=android/build/outputs/apk/debug/android-debug.apk
+          # Refuse to release an APK not signed with that key: phones couldn't update to it.
+          GOT=$("$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$APK" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
+          echo "APK signed with $GOT, want $WANT"
+          [ -n "$WANT" ] && [ "$GOT" = "$WANT" ] || { echo "::error::The APK isn't signed with the Android signing key (got $GOT, want $WANT)"; exit 1; }
+          cp "$APK" "$OUT/tappervpn-android.apk"
+          rm -f "$KS" "$ANDROID_USER_HOME/debug.keystore"
 
       - name: Sign
         if: env.DRY_RUN != 'true'
