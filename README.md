@@ -155,7 +155,7 @@ installed one.
 ## Roadmap
 
 1. **Own UI**: the Windows app (`cmd/tappervpn-gui`) does sign-in, connect,
-   exit node and devices; still to add there: the per-app routing app list.
+   exit node, per-app routing and devices.
 2. **macOS**: `NETransparentProxyProvider` system extension.
 3. **iOS**: full-tunnel or domain-based only. Per-app VPN needs MDM; iOS cannot be a gateway.
 4. **Logo in the web client**: its icons come from Tailscale's prebuilt web UI package; building our own web UI would let it use the TapperVPN logo too.

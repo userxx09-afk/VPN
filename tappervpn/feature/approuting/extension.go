@@ -5,6 +5,7 @@ package approuting
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/netip"
@@ -16,6 +17,7 @@ import (
 	"tappervpn.com/feature"
 	"tappervpn.com/ipn"
 	"tappervpn.com/ipn/ipnext"
+	"tappervpn.com/ipn/localapi"
 	"tappervpn.com/net/netns"
 	"tappervpn.com/net/packet"
 	"tappervpn.com/tailcfg"
@@ -39,16 +41,26 @@ func init() {
 		return
 	}
 	ipnext.RegisterExtension(featureName, newExtension)
+	localapi.Register("app-routing", serveLocalAPI)
 }
+
+// localStateKey is where the policy set in the TapperVPN app (LocalAPI
+// "app-routing") is kept in tappervpnd's state store.
+const localStateKey = ipn.StateKey("_tappervpn-app-routing")
 
 type extension struct {
 	logf   logger.Logf
 	router *Router
-	host   ipnext.Host // set in Init
+	host   ipnext.Host    // set in Init
+	store  ipn.StateStore // may be nil
 
 	mu         sync.Mutex
 	controlDoc []string // policy documents from the control server
-	lastErr    string   // last policy error logged, to avoid repeating it
+	localDoc   []byte   // policy set on this device in the TapperVPN app, or nil
+	source     string   // where the active policy came from: "control", "app", a file path, or ""
+	policyErr  string   // why the policy was rejected, or ""
+	exitActive bool     // an exit node is selected (app routing only applies then)
+	lastErr    string   // last policy message logged, to avoid repeating it
 }
 
 func newExtension(logf logger.Logf, b ipnext.SafeBackend) (ipnext.Extension, error) {
@@ -72,6 +84,9 @@ func newExtension(logf logger.Logf, b ipnext.SafeBackend) (ipnext.Extension, err
 	lc := netns.Listener(logf, netMon)
 
 	e := &extension{logf: logf}
+	if st, ok := sys.StateStore.GetOK(); ok {
+		e.store = st
+	}
 	e.router = NewRouter(RouterOptions{
 		Logf:         logf,
 		Verbose:      verboseEnv(),
@@ -138,8 +153,58 @@ func (e *extension) Init(h ipnext.Host) error {
 	e.onProfileStateChange(ipn.LoginProfileView{}, h.Profiles().CurrentPrefs(), true)
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.store != nil {
+		if b, err := e.store.ReadState(localStateKey); err == nil && len(b) > 0 {
+			e.localDoc = b
+		}
+	}
 	e.applyLocked()
 	return nil
+}
+
+// setLocal validates, saves and applies the policy set in the TapperVPN
+// app. A nil doc removes it (every app follows the exit node).
+func (e *extension) setLocal(doc []byte) error {
+	if doc != nil {
+		p, err := Merge([][]byte{doc})
+		if err != nil {
+			return err
+		}
+		if p != nil {
+			if _, err := p.Compile(CompileOptions{GOOS: runtime.GOOS}); err != nil {
+				return err
+			}
+		}
+	}
+	if e.store != nil {
+		if err := ipn.WriteState(e.store, localStateKey, doc); err != nil {
+			return fmt.Errorf("saving: %w", err)
+		}
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.localDoc = doc
+	e.applyLocked()
+	return nil
+}
+
+// status is what the TapperVPN app shows about per-app routing.
+type status struct {
+	Policy     json.RawMessage `json:"policy"`     // the policy set in the app, or null
+	Source     string          `json:"source"`     // where the active policy came from ("control", "app", a file, "")
+	Error      string          `json:"error"`      // why the active policy was rejected
+	ExitNode   bool            `json:"exitNode"`   // an exit node is selected; app routing only applies then
+	ControlSet bool            `json:"controlSet"` // the control server sends a policy, which overrides the app's
+}
+
+func (e *extension) status() status {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	st := status{Source: e.source, Error: e.policyErr, ExitNode: e.exitActive, ControlSet: len(e.controlDoc) > 0}
+	if e.localDoc != nil {
+		st.Policy = json.RawMessage(e.localDoc)
+	}
+	return st
 }
 
 func (e *extension) Shutdown() error {
@@ -173,16 +238,26 @@ func (e *extension) refreshGateways() {
 func (e *extension) onProfileStateChange(_ ipn.LoginProfileView, prefs ipn.PrefsView, _ bool) {
 	active := prefs.Valid() && (prefs.ExitNodeID() != "" || prefs.ExitNodeIP().IsValid())
 	e.router.SetExitNodeActive(active)
+	e.mu.Lock()
+	e.exitActive = active
+	e.mu.Unlock()
 }
 
 // applyLocked compiles and installs the current policy: the control
-// server's if it sent one, else the local file if configured. On error,
-// app routing is turned off rather than left on a stale policy.
+// server's if it sent one, else the one set in the TapperVPN app, else the
+// local file if configured. On error, app routing is turned off rather
+// than left on a stale policy.
 func (e *extension) applyLocked() {
 	var raw [][]byte
 	source := "control"
+	e.policyErr = ""
+	e.source = ""
 	for _, d := range e.controlDoc {
 		raw = append(raw, []byte(d))
+	}
+	if len(raw) == 0 && e.localDoc != nil {
+		raw = [][]byte{e.localDoc}
+		source = "app"
 	}
 	if len(raw) == 0 {
 		if path := policyFileEnv(); path != "" {
@@ -198,6 +273,7 @@ func (e *extension) applyLocked() {
 	}
 	p, err := Merge(raw)
 	if err != nil {
+		e.policyErr = err.Error()
 		e.reportLocked("policy from %s rejected, app routing off: %v", source, err)
 		e.router.SetMatcher(nil)
 		return
@@ -208,10 +284,12 @@ func (e *extension) applyLocked() {
 	}
 	m, err := p.Compile(CompileOptions{GOOS: runtime.GOOS})
 	if err != nil {
+		e.policyErr = err.Error()
 		e.reportLocked("policy from %s rejected, app routing off: %v", source, err)
 		e.router.SetMatcher(nil)
 		return
 	}
+	e.source = source
 	e.router.SetMatcher(m)
 	e.reportLocked("policy from %s active: %d rules, default %s", source, len(p.Rules), m.Default())
 }

@@ -163,6 +163,7 @@ function render() {
     if (m.self) out.push(`<section class="card"><h2>This PC</h2>${devRow(m.self, {self: true})}
       ${m.self.dnsName ? `<div class="row click" data-copy="${esc(m.self.dnsName)}"><div class="grow"><div class="meta">Name on the VPN</div><div class="mono">${esc(m.self.dnsName)}</div></div><button class="icon-btn" data-copy="${esc(m.self.dnsName)}">Copy</button></div>` : ""}</section>`);
     out.push(exitCard());
+    out.push(appsCard());
     out.push(devicesCard());
   }
   out.push(settingsCard());
@@ -174,13 +175,16 @@ function render() {
   if (id) { const el = document.getElementById(id); if (el) { el.focus(); try { el.setSelectionRange(pos, pos); } catch (e) {} } }
 }
 
+let arNewDraft = "";
 function saveDraft() {
-  const s = $("#server"), k = $("#authkey");
+  const s = $("#server"), k = $("#authkey"), a = $("#arnew");
   if (s) signInDraft = {server: s.value, key: k ? k.value : ""};
+  if (a) arNewDraft = a.value;
 }
 function restoreDraft() {
-  const s = $("#server"), k = $("#authkey");
+  const s = $("#server"), k = $("#authkey"), a = $("#arnew");
   if (s && signInDraft) { s.value = signInDraft.server; k.value = signInDraft.key; }
+  if (a) a.value = arNewDraft;
 }
 
 function signInCard() {
@@ -218,6 +222,53 @@ function exitCard() {
   return `<section class="card"><h2>Exit node</h2>${rows.join("")}</section>`;
 }
 
+let arDraft = null; // mode picked while no apps are listed yet (nothing to save until one is)
+let runApps = [];
+
+function appsCard() {
+  const ar = m.appRouting || {};
+  if (!ar.available) return "";
+  const mode = (ar.mode === "off" && arDraft) ? arDraft : ar.mode;
+  const modes = [
+    ["off", "All apps", "Everything uses the exit node"],
+    ["only", "Only chosen apps", "The apps below use the exit node; everything else uses this PC's own connection"],
+    ["except", "All apps except chosen", "The apps below use this PC's own connection; everything else uses the exit node"],
+  ];
+  const rows = [];
+  if (ar.controlSet) rows.push(`<div class="banner warn" style="margin:0 14px 10px">Your server sets per-app rules for this PC, and they override what's chosen here.</div>`);
+  if (ar.error) rows.push(`<div class="banner err" style="margin:0 14px 10px">Per-app rules aren't working: ${esc(ar.error)}</div>`);
+  for (const [k, t, d] of modes) rows.push(`<div class="row click" data-armode="${k}">
+      <span class="radio ${mode === k ? "sel" : ""}"></span>
+      <div class="grow"><div class="name">${t}</div><div class="meta" style="white-space:normal">${d}</div></div></div>`);
+  if (mode !== "off") {
+    for (const a of ar.apps) rows.push(`<div class="row"><div class="grow mono">${esc(a)}</div>
+      <button class="btn small danger" data-arremove="${esc(a)}">Remove</button></div>`);
+    if (!ar.apps.length) rows.push(`<div class="row"><div class="muted">No apps chosen yet. Add one below.</div></div>`);
+    rows.push(`<div class="row"><input type="text" id="arnew" list="arlist" placeholder="App, e.g. chrome.exe (pick a running one or type)" spellcheck="false">
+      <datalist id="arlist">${runApps.map((a) => `<option value="${esc(a)}">`).join("")}</datalist>
+      <button class="btn small" id="aradd">Add</button></div>`);
+  }
+  const note = !m.exit
+    ? "Takes effect when you choose an exit node above."
+    : "Applies to new connections; restart an app if it was already open.";
+  rows.push(`<div class="row"><div class="muted">${note}</div></div>`);
+  return `<section class="card"><h2>Per-app routing</h2>${rows.join("")}</section>`;
+}
+
+async function loadRunningApps() {
+  try {
+    const r = await fetch("/api/running-apps", {method: "POST", headers: {"X-TapperVPN-Token": token, "Content-Type": "application/json"}, body: "{}"});
+    runApps = (await r.json()).apps || [];
+    const dl = $("#arlist"); if (dl) dl.innerHTML = runApps.map((a) => `<option value="${esc(a)}">`).join("");
+  } catch (e) {}
+}
+
+function saveApps(mode, apps) {
+  if (mode !== "off" && !apps.length) { arDraft = mode; render(); return; }
+  arDraft = null;
+  api("app-routing", {mode, apps});
+}
+
 function devicesCard() {
   const f = filter.trim().toLowerCase();
   const list = m.devices.filter((d) => !f || (d.name + " " + d.ip + " " + d.os + " " + d.dnsName).toLowerCase().includes(f));
@@ -249,8 +300,16 @@ function settingsCard() {
 }
 
 document.addEventListener("click", async (e) => {
-  const t = e.target.closest("[data-copy],[data-exit],[data-open],#signin,#signout,#check,#install");
+  const t = e.target.closest("[data-copy],[data-exit],[data-open],[data-armode],[data-arremove],#aradd,#signin,#signout,#check,#install");
   if (!t) return;
+  const ar = m.appRouting || {};
+  if (t.dataset.armode) { saveApps(t.dataset.armode, t.dataset.armode === "off" ? [] : ar.apps); if (t.dataset.armode !== "off") loadRunningApps(); return; }
+  if (t.dataset.arremove) { saveApps(ar.mode, ar.apps.filter((a) => a !== t.dataset.arremove)); return; }
+  if (t.id === "aradd") {
+    const v = $("#arnew").value.trim(); if (!v) return;
+    const mode = ar.mode === "off" ? (arDraft || "only") : ar.mode;
+    saveApps(mode, [...ar.apps, v]); $("#arnew").value = ""; arNewDraft = ""; return;
+  }
   if (t.dataset.copy !== undefined) { e.stopPropagation(); if (t.dataset.copy) copy(t.dataset.copy); return; }
   if (t.dataset.exit !== undefined) { api("exit-node", {id: t.dataset.exit}); return; }
   if (t.dataset.open) { api("open", {id: t.dataset.open}); return; }
@@ -270,7 +329,9 @@ document.addEventListener("input", (e) => {
 });
 document.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.target.id === "server" || e.target.id === "authkey")) $("#signin").click();
+  if (e.key === "Enter" && e.target.id === "arnew") $("#aradd").click();
 });
+document.addEventListener("focusin", (e) => { if (e.target.id === "arnew") loadRunningApps(); });
 
 function connect() {
   const es = new EventSource("/api/events?token=" + encodeURIComponent(token));

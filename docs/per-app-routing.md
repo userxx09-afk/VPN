@@ -321,3 +321,19 @@ policy can't inject them itself.)
   the app gets a setting for it.
 - Gateway resolution follows the netmap. If a gateway goes offline, new flows get
   `gatewayUnavailable`; flows already in progress keep their decision until they end.
+
+## Set in the TapperVPN app (added 2026-11-08)
+
+Per-app routing is now chosen on each PC, in the TapperVPN app's **Per-app routing**
+card: *All apps* (no rules), *Only chosen apps* (default `direct`, chosen apps
+`gateway`) or *All apps except chosen* (default `gateway`, chosen apps `direct`).
+Apps are picked from the running programs or typed as an exe name.
+
+- The app saves the policy through LocalAPI `app-routing` (GET for status, POST
+  `{"policy": ... | null}`); tappervpnd keeps it in its state store under
+  `_tappervpn-app-routing`, so it survives restarts and updates.
+- Order of precedence: a policy from the control server, then the app's, then
+  `TS_DEBUG_APPROUTING_FILE`. If the server sends one, the app says so instead of
+  silently ignoring the user's choice. The server sends none by default
+  (`server/policy.hujson`).
+- Rules only apply while an exit node is selected; the card says so.

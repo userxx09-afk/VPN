@@ -82,10 +82,12 @@ func (s *webServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		On     bool   `json:"on"`
-		ID     string `json:"id"`
-		Server string `json:"server"`
-		Key    string `json:"key"`
+		On     bool     `json:"on"`
+		ID     string   `json:"id"`
+		Server string   `json:"server"`
+		Key    string   `json:"key"`
+		Mode   string   `json:"mode"`
+		Apps   []string `json:"apps"`
 	}
 	json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req)
 
@@ -98,6 +100,11 @@ func (s *webServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		err = h.SetExitNode(tailcfg.StableNodeID(req.ID))
 	case "/api/allow-lan":
 		err = h.SetAllowLAN(req.On)
+	case "/api/app-routing":
+		err = h.SetAppRouting(req.Mode, req.Apps)
+	case "/api/running-apps":
+		writeJSON(w, map[string]any{"apps": runningApps()})
+		return
 	case "/api/sign-in":
 		err = h.SignIn(req.Server, req.Key)
 	case "/api/sign-out":

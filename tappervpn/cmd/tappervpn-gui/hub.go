@@ -30,22 +30,23 @@ import (
 // Model is everything the window and the tray show. It's sent to the
 // window as JSON.
 type Model struct {
-	Version    string   `json:"version"`
-	ServiceErr string   `json:"serviceErr,omitempty"` // service unreachable
-	State      string   `json:"state"`                // ipn.State: NeedsLogin, Stopped, Starting, Running, ...
-	LoggedIn   bool     `json:"loggedIn"`             // has a node key (signed in, even if stopped)
-	AuthURL    string   `json:"authURL,omitempty"`    // approve this PC here
-	ControlURL string   `json:"controlURL"`
-	DefaultURL string   `json:"defaultURL"`
-	AdminURL   string   `json:"adminURL"`
-	Self       *Device  `json:"self,omitempty"`
-	Exit       *Device  `json:"exit,omitempty"` // current exit node
-	AllowLAN   bool     `json:"allowLAN"`
-	Devices    []Device `json:"devices"`
-	Health     []string `json:"health,omitempty"`
-	Error      string   `json:"error,omitempty"` // last failed action
-	Busy       string   `json:"busy,omitempty"`  // action in progress
-	Update     Update   `json:"update"`
+	Version    string     `json:"version"`
+	ServiceErr string     `json:"serviceErr,omitempty"` // service unreachable
+	State      string     `json:"state"`                // ipn.State: NeedsLogin, Stopped, Starting, Running, ...
+	LoggedIn   bool       `json:"loggedIn"`             // has a node key (signed in, even if stopped)
+	AuthURL    string     `json:"authURL,omitempty"`    // approve this PC here
+	ControlURL string     `json:"controlURL"`
+	DefaultURL string     `json:"defaultURL"`
+	AdminURL   string     `json:"adminURL"`
+	Self       *Device    `json:"self,omitempty"`
+	Exit       *Device    `json:"exit,omitempty"` // current exit node
+	AllowLAN   bool       `json:"allowLAN"`
+	Devices    []Device   `json:"devices"`
+	Health     []string   `json:"health,omitempty"`
+	Error      string     `json:"error,omitempty"` // last failed action
+	Busy       string     `json:"busy,omitempty"`  // action in progress
+	Update     Update     `json:"update"`
+	AppRouting AppRouting `json:"appRouting"`
 }
 
 type Device struct {
@@ -255,6 +256,7 @@ func (h *hub) read() Model {
 		m.ControlURL = prefs.ControlURL
 		m.AllowLAN = prefs.ExitNodeAllowLANAccess
 	}
+	m.AppRouting = h.readAppRouting(ctx)
 	if st.Self != nil && len(st.Self.TapperVPNIPs) > 0 {
 		d := toDevice(st.Self)
 		d.Online = st.BackendState == ipn.Running.String()
