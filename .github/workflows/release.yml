@@ -132,6 +132,11 @@ jobs:
           ANDROID_DEBUG_KEYSTORE: ${{ secrets.ANDROID_DEBUG_KEYSTORE }}
         run: |
           # Same steps as scripts/build-android.ps1.
+          # On failure, repeat the error lines as annotations: those are public,
+          # the full log needs a GitHub sign-in.
+          LOG="$RUNNER_TEMP/android.log"
+          exec > >(tee "$LOG") 2>&1
+          trap 'rc=$?; if [ $rc -ne 0 ]; then sleep 1; grep -E "^e: |error:|What went wrong|FAILED|Exception" "$LOG" | grep -v "^::" | tail -20 | while IFS= read -r l; do echo "::error::$l"; done; fi' EXIT
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;23.1.7779620" "platforms;android-36" "build-tools;36.0.0" >/dev/null
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/23.1.7779620"
