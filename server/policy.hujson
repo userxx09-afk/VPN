@@ -5,41 +5,37 @@
     { "action": "accept", "src": ["*"], "dst": ["*:*"] }
   ],
 
+  // Devices marked "Workstation" on the admin page (http://100.64.0.2:8096) get this tag.
+  "tagOwners": {
+    "tag:workstation": ["admin@"],
+    "tag:server": ["admin@"],
+    // A plain tag with no extra access: the Workstation switch swaps a device to this when
+    // turned off (headscale won't let a tagged device have zero tags).
+    "tag:device": ["admin@"]
+  },
+
+  // Workstations may SSH into the home server over the VPN ("tappervpn ssh claude@100.64.0.2"),
+  // with no SSH keys. Turning the switch off on the admin page takes this away at once.
+  "ssh": [
+    {
+      "action": "accept",
+      "src": ["tag:workstation"],
+      "dst": ["tag:server"],
+      "users": ["claude", "frank"]
+    }
+  ],
+
   // Approve exit nodes and 4via6 gateway routes from our own devices
   // automatically, so "Run as exit node" works without a CLI step.
   "autoApprovers": {
-    "exitNode": ["admin@"],
+    "exitNode": ["admin@", "tag:workstation", "tag:server", "tag:device"],
     "routes": { "fd7a:115c:a1e0:b1a::/64": ["admin@"] }
   },
 
-  // Per-app routing policy, pushed to every node. Apps not listed go direct.
+  // Per-app routing is set on each device, in the TapperVPN app, not here.
   "nodeAttrs": [
     // Devices save the network map to disk, so after a restart they can
     // reconnect to their peers even while the control server is down.
-    { "target": ["*"], "attr": ["cache-network-maps"] },
-    {
-      "target": ["*"],
-      "app": {
-        "meshwall.dev/cap/app-routing": [
-          {
-            "version": 1,
-            "default": "direct",
-            "unidentified": "direct",
-            "gatewayUnavailable": "block",
-            "rules": [
-              {
-                "name": "Browsers and curl through the exit node",
-                "action": "gateway",
-                "apps": [
-                  { "windows": { "exe": "chrome.exe" } },
-                  { "windows": { "exe": "firefox.exe" } },
-                  { "windows": { "exe": "curl.exe" } }
-                ]
-              }
-            ]
-          }
-        ]
-      }
-    }
+    { "target": ["*"], "attr": ["cache-network-maps"] }
   ]
 }
