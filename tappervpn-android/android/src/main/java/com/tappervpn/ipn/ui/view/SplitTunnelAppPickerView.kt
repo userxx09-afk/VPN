@@ -29,7 +29,10 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
@@ -60,6 +63,9 @@ fun SplitTunnelAppPickerView(
   val showSwitchDialog by model.showSwitchDialog.collectAsState()
   val iconSize = 40.dp
   val iconSizePx = with(LocalDensity.current) { iconSize.roundToPx() }
+  var query by rememberSaveable { mutableStateOf("") }
+  // Filtered by the search box (the order stays put, so a ticked app doesn't jump away).
+  val shownApps = remember(installedApps, query) { installedApps.matching(query) }
 
   if (showSwitchDialog) {
     SwitchAlertDialog(
@@ -142,7 +148,8 @@ fun SplitTunnelAppPickerView(
             }
           }
         } else {
-          items(installedApps, key = { it.packageName }) { app ->
+          item("search") { AppSearchField(query) { query = it } }
+          items(shownApps, key = { it.packageName }) { app ->
             val icon =
                 remember(app.packageName, iconSizePx) {
                   model.installedAppsManager.packageManager

@@ -23,7 +23,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalDensity
@@ -71,10 +74,11 @@ fun AppExitNodesView(
     )
   }
 
-  // Apps with an exit node first, then the rest; both alphabetical.
+  var query by rememberSaveable { mutableStateOf("") }
+  // Apps with an exit node first, then the rest; both alphabetical; filtered by the search box.
   val sortedApps =
-      remember(installedApps, assignments) {
-        installedApps.sortedBy { if (assignments.containsKey(it.packageName)) 0 else 1 }
+      remember(installedApps, assignments, query) {
+        installedApps.sortedBy { if (assignments.containsKey(it.packageName)) 0 else 1 }.matching(query)
       }
 
   Scaffold(topBar = { Header(titleRes = R.string.app_exit_nodes, onBack = backToSettings) }) {
@@ -106,6 +110,7 @@ fun AppExitNodesView(
       item("count") {
         Lists.SectionDivider(stringResource(R.string.app_exit_nodes_count, assignments.size))
       }
+      item("search") { AppSearchField(query) { query = it } }
       items(sortedApps, key = { it.packageName }) { app ->
         val icon =
             remember(app.packageName, iconSizePx) {
