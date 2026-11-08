@@ -374,7 +374,9 @@ $('#pending').addEventListener('click', async e=>{
 const fmtB=n=>n<1024?n+' B':n<1048576?(n/1024).toFixed(0)+' KB':n<1073741824?(n/1048576).toFixed(1)+' MB':(n/1073741824).toFixed(2)+' GB';
 const fmtRate=bps=>{const m=bps*8/1e6; return m>=1?m.toFixed(1)+' Mbit/s':(bps*8/1e3).toFixed(0)+' kbit/s';};
 const fmtTime=iso=>new Date(iso).toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit',second:'2-digit'});
-const PORTS={53:'DNS',80:'HTTP',443:'HTTPS',22:'SSH',554:'RTSP',1935:'RTMP',5480:"Gary's TV",8090:'Arlo Keeper',8096:'Admin',8080:'VPN control'};
+const PORTS={53:'DNS',80:'HTTP',443:'HTTPS',22:'SSH',554:'RTSP',1935:'RTMP'};
+const SERVER_PORTS={5480:"Gary's TV",8090:'Arlo Keeper',8096:'Admin page',8080:'VPN control'};
+const portName=f=>(f.where==='server'&&SERVER_PORTS[f.dport])||PORTS[f.dport]||'';
 let devNames={};
 function pathTag(d){
   if(!d.online) return '<span class="tag">Offline</span>';
@@ -411,7 +413,7 @@ async function loadDiag(){
     $('#diag-flows').innerHTML='<tr><th>Device</th><th>To</th><th>Port</th><th>Status</th><th>Down</th><th>Up</th></tr>'+
       (fl.length?fl.slice(0,150).map(f=>`<tr><td>${esc(devNames[f.src]||f.src)}</td>
         <td>${f.where==='server'?'<b>this server</b>':esc(f.host||f.dst)}${f.host?`<br><span class="sub mono">${esc(f.dst)}</span>`:''}</td>
-        <td>${esc(f.dport)}/${esc(f.proto)}${PORTS[f.dport]?`<br><span class="sub">${esc(PORTS[f.dport])}</span>`:''}</td>
+        <td>${esc(f.dport)}/${esc(f.proto)}${portName(f)?`<br><span class="sub">${esc(portName(f))}</span>`:''}</td>
         <td>${f.noReply?'<span class="tag bad">No reply</span>':`<span class="tag">${esc((f.state||'open').toLowerCase())}</span>`}</td>
         <td>${fmtB(f.down)}</td><td>${fmtB(f.up)}</td></tr>`).join(''):'<tr><td colspan="6" class="sub">None right now.</td></tr>');
     const ev=d.events||[];
