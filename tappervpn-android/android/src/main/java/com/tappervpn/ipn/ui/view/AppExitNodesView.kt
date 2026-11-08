@@ -52,7 +52,14 @@ fun AppExitNodesView(
   val iconSize = 40.dp
   val iconSizePx = with(LocalDensity.current) { iconSize.roundToPx() }
 
-  LaunchedEffect(Unit) { model.refreshUsageAccess() }
+  val needsUsageAccess by model.needsUsageAccess.collectAsState()
+  // Notice when the user comes back from Settings with usage access turned on.
+  LaunchedEffect(Unit) {
+    while (true) {
+      model.refreshUsageAccess()
+      kotlinx.coroutines.delay(2000)
+    }
+  }
 
   pickingFor?.let { app ->
     ExitNodeChoiceDialog(
@@ -76,9 +83,10 @@ fun AppExitNodesView(
       item("explainer") {
         ListItem(headlineContent = { Text(stringResource(R.string.app_exit_nodes_explainer)) })
       }
-      if (assignments.isNotEmpty() && !hasUsageAccess) {
+      if (needsUsageAccess && !hasUsageAccess) {
         item("usageAccess") {
           ListItem(
+              modifier = Modifier.clickable { model.openUsageAccessSettings() },
               headlineContent = {
                 Text(
                     stringResource(R.string.app_exit_nodes_no_usage_access),

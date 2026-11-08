@@ -328,8 +328,8 @@
     <!-- Per-app exit nodes (TapperVPN) -->
     <string name="app_exit_nodes">Per-app exit nodes</string>
     <string name="app_exit_nodes_subtitle">Send each app through its own exit node.</string>
-    <string name="app_exit_nodes_explainer">When an app with an exit node is opened, TapperVPN switches to that exit node. Apps set to Normal internet don\'t use the VPN at all. While any app has an exit node, this replaces App split tunneling.</string>
-    <string name="app_exit_nodes_no_usage_access">TapperVPN can\'t see which app is open yet. Grant usage access: adb shell appops set com.tappervpn.ipn GET_USAGE_STATS allow</string>
+    <string name="app_exit_nodes_explainer">Only the apps given an exit node use the VPN; every other app uses your normal internet. If they all use the same exit node, it's turned on as soon as TapperVPN connects. If they use different ones, TapperVPN switches to each app's exit node when you open it. While any app has an exit node, this replaces App split tunneling.</string>
+    <string name="app_exit_nodes_no_usage_access">These apps use different exit nodes, so TapperVPN needs to see which app is open. Tap here and turn on Usage access for TapperVPN. (Fire TV has no such screen: adb shell appops set com.tappervpn.ipn GET_USAGE_STATS allow)</string>
     <string name="app_exit_nodes_count">%1$d apps with an exit node</string>
     <string name="app_exit_nodes_normal">Normal internet</string>
     <string name="app_exit_nodes_offline">%1$s (offline)</string>
