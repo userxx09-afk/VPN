@@ -37,6 +37,10 @@ is `com.tappervpn.ipn`. "Tailscale" still appears in the copyright notices
 new updates and must be reinstalled by hand. If the Android key is lost,
 the app must be uninstalled and reinstalled.
 
+Both keys were replaced on 2026-11-08 (release key `d739b42fa865f734`) after
+the originals were lost. Devices installed from 0.2.4 or older trust only the
+old key: reinstall them once from 0.2.5 or newer (Android: uninstall first).
+
 ## Prerequisites (Windows build PC)
 
 - Go 1.27.2+ (https://go.dev/dl/), Git, Python 3.
