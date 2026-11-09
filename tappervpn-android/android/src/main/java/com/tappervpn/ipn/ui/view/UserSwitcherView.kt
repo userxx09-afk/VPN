@@ -154,9 +154,8 @@ fun UserSwitcherView(nav: UserSwitcherNav, viewModel: UserSwitcherViewModel = vi
                 },
             )
           }
-
-          Lists.SectionDivider()
-          Setting.Text(R.string.delete_tailnet, destructive = true) { showDeleteDialog = true }
+          // TapperVPN: no "Delete tailnet" here; it's a Tailscale account option that does
+          // nothing on our own server. Devices are removed on the admin page.
         }
       }
     }

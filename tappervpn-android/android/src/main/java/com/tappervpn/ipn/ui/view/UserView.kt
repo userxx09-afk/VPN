@@ -63,14 +63,17 @@ fun UserView(
           },
           supportingContent = {
             Column {
+              val networkName = profile.NetworkProfile?.tailnetNameForDisplay() ?: ""
               AutoResizingText(
-                  text = profile.NetworkProfile?.tailnetNameForDisplay() ?: "",
+                  text = networkName,
                   style = MaterialTheme.typography.bodyMedium.short,
                   minFontSize = MaterialTheme.typography.minTextSize,
                   overflow = TextOverflow.Ellipsis,
               )
 
-              profile.customControlServerHostname()?.let {
+              // Show the server only when it differs from the network name (ours are both
+              // vp.tapper.co, which showed the same line twice).
+              profile.customControlServerHostname()?.takeIf { it != networkName }?.let {
                 AutoResizingText(
                     text = it,
                     style = MaterialTheme.typography.bodyMedium.short,
