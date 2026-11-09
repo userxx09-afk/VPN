@@ -41,6 +41,7 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.tappervpn.ipn.R
+import com.tappervpn.ipn.ui.Links
 import com.tappervpn.ipn.ui.util.Lists
 import com.tappervpn.ipn.ui.util.itemsWithDividers
 import com.tappervpn.ipn.ui.util.set
@@ -232,9 +233,9 @@ fun OwnerDeleteDialogText() {
   val annotatedText = buildAnnotatedString {
     append(part1 + " ")
 
-    pushLink(LinkAnnotation.Url("https://login.tailscale.com/admin/settings/general"))
+    pushLink(LinkAnnotation.Url(Links.ADMIN_URL))
     withStyle(style = SpanStyle(color = MaterialTheme.colorScheme.primary)) {
-      append("Settings > General")
+      append("the admin page")
     }
     pop()
 

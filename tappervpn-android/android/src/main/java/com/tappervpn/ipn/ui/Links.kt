@@ -3,10 +3,13 @@
 
 package com.tappervpn.ipn.ui
 
+import com.tappervpn.ipn.BuildConfig
+
 object Links {
   const val DEFAULT_CONTROL_URL = "https://controlplane.tailscale.com"
   const val SERVER_URL = "https://login.tailscale.com"
-  const val ADMIN_URL = SERVER_URL + "/admin"
+  // Our own admin page on tapper (server/vpn-admin), not Tailscale's console.
+  val ADMIN_URL: String = BuildConfig.ADMIN_URL
   const val SIGNIN_URL = "https://tailscale.com/login"
   const val PRIVACY_POLICY_URL = "https://tailscale.com/privacy-policy/"
   const val TERMS_URL = "https://tailscale.com/terms"

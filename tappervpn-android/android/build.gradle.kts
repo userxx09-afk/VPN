@@ -47,6 +47,13 @@ android {
         "DEFAULT_CONTROL_URL",
         "\"${project.findProperty("controlURL")?.toString() ?: ""}\"",
     )
+    // TapperVPN admin page (server/vpn-admin) opened by "admin console" links.
+    // Same default as the Windows app; override with -PadminURL=http://host:port.
+    buildConfigField(
+        "String",
+        "ADMIN_URL",
+        "\"${project.findProperty("adminURL")?.toString() ?: "http://100.64.0.2:8096"}\"",
+    )
   }
 
   compileOptions {
