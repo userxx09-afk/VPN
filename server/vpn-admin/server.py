@@ -190,6 +190,7 @@ DIAG_STATE = "/run/vpn-diag/state.json"
 DIAG_EVENTS = "/var/lib/vpn-diag/events.jsonl"
 SPEED_MAX = 100 * 1024 * 1024
 speed_results = []  # recent speed tests, newest last (kept in memory)
+crash_reports = []  # recent app crash reports, newest last (kept in memory; also in the journal)
 _chunk = os.urandom(256 * 1024)  # random, so nothing on the way can compress it
 
 
@@ -205,7 +206,7 @@ def diag(device):
         events = [json.loads(l) for l in lines if l.strip()]
     except (OSError, ValueError):
         events = []
-    events += speed_results
+    events += speed_results + crash_reports
     if device:
         st["devices"] = [d for d in st["devices"] if d["ip"] == device]
         st["flows"] = [f for f in st["flows"] if f["src"] == device]
@@ -348,6 +349,26 @@ class Handler(BaseHTTPRequestHandler):
                                   "msg": f"Speed test to the server: {down:.1f} Mbit/s down, {up:.1f} Mbit/s up",
                                   "down": down, "up": up})
             del speed_results[:-50]
+            return self.send_json(200, {"ok": True})
+        if path0 == "/api/crash" and self.headers.get("X-VPN-Admin") == "1":
+            # Crash report from the Android app (CrashReporter.kt): device info + stack trace.
+            try:
+                n = min(int(self.headers.get("Content-Length") or 0), 64 * 1024)
+                report = str(json.loads(self.rfile.read(n) or b"{}").get("report", ""))[:60000]
+            except (ValueError, TypeError, AttributeError):
+                return self.send_json(400, {"error": "bad JSON"})
+            if not report.strip():
+                return self.send_json(400, {"error": "empty report"})
+            ip = self.client_address[0].split("%")[0].removeprefix("::ffff:")
+            headers = ("time:", "version:", "device:", "thread:")
+            first = next((l.strip() for l in report.splitlines()
+                          if l.strip() and not l.startswith(headers)), "unknown error")
+            crash_reports.append({"at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                                  "kind": "crash", "device": ip,
+                                  "msg": "App crashed: " + first[:200], "detail": report})
+            del crash_reports[:-20]
+            # Also into the journal, so a report survives a restart of this page.
+            print(f"crash report from {ip}:\n{report}", flush=True)
             return self.send_json(200, {"ok": True})
         # A custom header + JSON body means another website can't trigger these.
         if self.headers.get("X-VPN-Admin") != "1" or \

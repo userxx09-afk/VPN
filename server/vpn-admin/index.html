@@ -418,7 +418,7 @@ async function loadDiag(){
         <td>${fmtB(f.down)}</td><td>${fmtB(f.up)}</td></tr>`).join(''):'<tr><td colspan="6" class="sub">None right now.</td></tr>');
     const ev=d.events||[];
     $('#diag-events').innerHTML=ev.length?ev.slice(0,120).map(e=>`<div class="ev"><time>${esc(fmtTime(e.at))}</time><span>${
-      ['offline','noreply','slow','noping'].includes(e.kind)?'<span class="tag bad">'+esc(e.kind)+'</span> ':e.kind==='path'?'<span class="tag warn">path</span> ':''}${esc(e.msg)}</span></div>`).join(''):'<p class="sub">No events.</p>';
+      ['offline','noreply','slow','noping','crash'].includes(e.kind)?'<span class="tag bad">'+esc(e.kind)+'</span> ':e.kind==='path'?'<span class="tag warn">path</span> ':''}${esc(e.msg)}${e.detail?'<details><summary>Show error</summary><pre style="white-space:pre-wrap;font-size:12px;overflow-x:auto">'+esc(e.detail)+'</pre></details>':''}</span></div>`).join(''):'<p class="sub">No events.</p>';
   }catch(e){ $('#diag-err').textContent='Could not load diagnostics: '+e.message; }
 }
 $('#diag-dev').addEventListener('change', loadDiag);

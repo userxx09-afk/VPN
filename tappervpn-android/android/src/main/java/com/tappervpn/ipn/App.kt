@@ -115,6 +115,8 @@ class App : UninitializedApp(), libtappervpn.AppContext, ViewModelStoreOwner {
 
   override fun onCreate() {
     super.onCreate()
+    CrashReporter.install(this)
+    CrashReporter.sendPending(this)
     appInstance = this
     setUnprotectedInstance(this)
     mdmChangeReceiver = MDMSettingsChangedReceiver()
