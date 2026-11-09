@@ -22,6 +22,11 @@ import (
 //go:embed ui/index.html
 var indexHTML []byte
 
+// The June 1983 photo the logo comes from, shown across the top of the window.
+//
+//go:embed ui/banner.jpg
+var bannerJPG []byte
+
 // webServer serves the TapperVPN window on 127.0.0.1. Every request must
 // carry the random token from the URL the app opened (path for the page,
 // header or query for the API), and the Host header must be the loopback
@@ -53,6 +58,10 @@ func (s *webServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		png.Encode(&buf, drawLogo(64, strokeColor[stateOn]))
 		w.Header().Set("Content-Type", "image/png")
 		w.Write(buf.Bytes())
+		return
+	case r.URL.Path == prefix+"banner.jpg":
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Write(bannerJPG)
 		return
 	case strings.HasPrefix(r.URL.Path, "/api/"):
 	default:

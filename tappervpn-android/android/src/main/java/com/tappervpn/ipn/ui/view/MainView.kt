@@ -156,6 +156,7 @@ fun MainView(
         val showKeyExpiry by viewModel.showExpiry.collectAsState()
 
         val hideHeader = (isAndroidTV() && state == Ipn.State.NeedsLogin)
+        HeaderPhoto(height = if (isAndroidTV()) 140.dp else 170.dp)
         ListItem(
             colors = MaterialTheme.colorScheme.surfaceContainerListItem,
             leadingContent = {
