@@ -160,6 +160,7 @@ file in the repo). Devices pick a release up within a day.
 | Update downloaded, then "App not installed" | A test build installed by hand had a higher versionCode (it came from the build time) than the release | 0.2.2: versionCode comes from `VERSION`, so releases always go up |
 | Update not offered for hours | The background check runs once a day | 0.2.2: Settings → Check for updates, and opening the app checks if the last check is 6+ hours old |
 | Fire TV install failed: signature mismatch | The old app was signed with a key that was lost | Uninstalled, reinstalled; keep `%USERPROFILE%\.android\debug.keystore` backed up |
+| Android 0.2.5–0.2.8 won't update to 0.2.9 or later ("App not installed") | The release runner signed each of those with a new throwaway key (0.2.8: `c48cb92a…`); 0.2.9+ use the real key (`51d9b242…`), and Android never updates across keys | Uninstall once and install the latest APK by hand, then sign in again. 0.2.9+ update normally; the release fails if the APK isn't signed with the real key |
 | Fire TV app crashed (SIGSYS) | Stock Go uses `futex_time64`, which Fire OS's seccomp kills | Build Android with the patched Go (`patches\go-android-time32.patch`) |
 | Fire TV VPN prompt "auto-rejected" | The TV was asleep when the prompt came up | Wake it, choose Try again, then OK |
 | Browser warning on the sign-in page | Plain HTTP | Expected on the LAN; HTTPS comes with the public name |
