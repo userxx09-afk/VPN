@@ -17,6 +17,15 @@ sysctl -q -p /etc/sysctl.d/60-vpn-diag.conf || true
 
 install -d -m 0755 /opt/vpn-admin /opt/vpn-diag
 install -m 0644 "$HERE/server.py" "$HERE/index.html" /opt/vpn-admin/
+# Which release each app version is, for the devices' "App version" (needs git; a copy
+# without .git can bring a releases.json made elsewhere by make-releases.py).
+if command -v git >/dev/null && git -C "$HERE" rev-parse --git-dir >/dev/null 2>&1; then
+  python3 "$HERE/make-releases.py" /opt/vpn-admin/releases.json
+elif [ -f "$HERE/releases.json" ]; then
+  install -m 0644 "$HERE/releases.json" /opt/vpn-admin/
+else
+  echo "No releases.json: the admin page will show app versions without release numbers." >&2
+fi
 install -m 0644 "$DIAG/collector.py" /opt/vpn-diag/
 install -m 0644 "$HERE/vpn-admin.service" "$DIAG/vpn-diag.service" /etc/systemd/system/
 [ -f /etc/vpn-admin/api-key ] || echo "Add /etc/vpn-admin/api-key (see the top of this script)." >&2

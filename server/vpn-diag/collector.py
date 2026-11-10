@@ -4,6 +4,7 @@
 Every few seconds it records, for every device on the VPN:
   - online or not, and the path to it: direct (ip:port) or through a relay (DERP)
   - round-trip time (tappervpn ping), how much it's sending and receiving right now
+  - the app version it reports (from this server's netmap, once a minute)
   - its open connections through this server: to the internet when it uses the
     server as exit node, or to the server's own apps (from the kernel's
     connection tracker); "no reply" ones are blocked or unreachable
@@ -29,6 +30,7 @@ STATE = "/run/vpn-diag/state.json"
 EVENTS = "/var/lib/vpn-diag/events.jsonl"
 SAMPLE_SECS = 5
 PING_SECS = 30
+VERSION_SECS = 60      # how often to re-read the app versions devices report
 SLOW_MS = 250          # ping above this is logged as slow
 MAX_EVENTS = 5000
 MAX_FLOWS = 400
@@ -125,6 +127,26 @@ def peers():
     return self_ips, res
 
 
+def versions():
+    """App version each device reports to the control server (its Hostinfo), keyed by VPN IPv4.
+
+    Read from this server's own netmap, which carries every device's Hostinfo, including
+    devices that are offline right now (they keep their last report).
+    """
+    try:
+        d = json.loads(run(["tappervpn", "debug", "netmap"]))
+    except ValueError:
+        return None
+    res = {}
+    for n in [d.get("SelfNode") or {}] + (d.get("Peers") or []):
+        v4 = next((a.split("/")[0] for a in n.get("Addresses") or [] if "." in a), "")
+        h = n.get("Hostinfo") or {}
+        if v4:
+            res[v4] = {"version": h.get("IPNVersion") or "", "os": h.get("OS") or "",
+                       "osVersion": h.get("OSVersion") or "", "model": h.get("DeviceModel") or ""}
+    return res
+
+
 def ping(ip):
     out = run(["tappervpn", "ping", "-c", "1", "--timeout", "3s", ip], timeout=6)
     m = PING_RE.search(out)
@@ -175,6 +197,7 @@ def main():
     event("start", "", "Diagnostics collector started")
     have_conntrack = bool(run(["sh", "-c", "command -v conntrack"]).strip())
     prev, pings, last_ping, last_trim = {}, {}, 0.0, time.time()
+    vers, last_versions = {}, 0.0
     noreply_seen = {}
     lock = threading.Lock()
 
@@ -236,7 +259,11 @@ def main():
             d["ping"] = pv.get(ip)
             d["flows"] = sum(1 for f in fl if f["src"] == ip)
             devices.append(d)
-        snap = {"at": now(), "conntrack": have_conntrack, "devices": devices, "flows": fl[:MAX_FLOWS]}
+        if t0 - last_versions >= VERSION_SECS:
+            last_versions = t0
+            vers = versions() or vers
+        snap = {"at": now(), "conntrack": have_conntrack, "devices": devices, "flows": fl[:MAX_FLOWS],
+                "versions": vers}
         tmp = STATE + ".tmp"
         with open(tmp, "w") as f:
             json.dump(snap, f)

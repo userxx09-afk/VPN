@@ -91,6 +91,8 @@ select{font:inherit;font-size:14px;padding:8px 10px;border-radius:8px;border:1px
 .tbl th{text-align:left;color:var(--muted);font-weight:500;font-size:12px;padding:6px;border-bottom:1px solid var(--line);white-space:nowrap}
 .tbl td{padding:6px;border-top:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}
 .tblwrap{overflow-x:auto}
+.ver-old{color:var(--danger);font-weight:600}
+.ver-ok{color:var(--ok)}
 .tag{font-size:12px;padding:2px 8px;border-radius:99px;background:var(--bg);color:var(--muted);white-space:nowrap}
 .tag.good{background:var(--ok-soft);color:var(--ok)}
 .tag.warn{background:#fff4d6;color:#8a5a00}
@@ -112,6 +114,7 @@ select{font:inherit;font-size:14px;padding:8px 10px;border-radius:8px;border:1px
     <div class="stat"><b id="s-total">–</b><span>Devices</span></div>
     <div class="stat"><b id="s-online">–</b><span>Online</span></div>
     <div class="stat"><b id="s-exit">–</b><span>Exit nodes</span></div>
+    <div class="stat"><b id="s-old">–</b><span>Out of date</span></div>
   </div>
 
   <section class="approve waiting-box" id="pending-box" hidden>
@@ -239,6 +242,7 @@ function card(n){
     <dl>
       <dt>VPN address</dt><dd class="mono">${esc(v4)}</dd>
       <dt>Last seen</dt><dd>${n.online?'now':esc(ago(n.lastSeen))}</dd>
+      <dt>App version</dt><dd>${appVer(n.app)}</dd>
       <dt>Added</dt><dd>${esc(n.createdAt?new Date(n.createdAt).toLocaleDateString():'')}</dd>
       ${n.subnetRoutes.length?`<dt>Subnets</dt><dd class="mono">${esc(n.subnetRoutes.join(', '))}</dd>`:''}
     </dl>
@@ -251,16 +255,29 @@ function card(n){
   </article>`;
 }
 
+// The TapperVPN release a device runs, from the version it reports (see app_version in server.py).
+function appVer(a){
+  a=a||{};
+  if(!a.raw) return '<span class="sub">unknown</span>';
+  const raw=`title="${esc(a.raw)}"`;
+  if(a.status==='old') return `<span class="ver-old" ${raw}>${esc(a.release)} – out of date (latest ${esc(LATEST)})</span>`;
+  if(a.status==='current') return `<span class="ver-ok" ${raw}>${esc(a.release)}</span> <span class="sub">latest</span>`;
+  return `<span class="mono" ${raw}>${esc(a.raw)}</span> <span class="sub">(not a TapperVPN release)</span>`;
+}
+let LATEST='';
+
 async function load(){
   try{
     const r=await fetch('/api/nodes',{cache:'no-store'});
     const d=await r.json();
     if(!r.ok) throw new Error(d.error||r.status);
     const ns=d.nodes;
+    LATEST=d.latest||'';
     $('#grid').innerHTML = ns.length ? ns.map(card).join('') : '<div class="empty">No devices yet.</div>';
     $('#s-total').textContent=ns.length;
     $('#s-online').textContent=ns.filter(n=>n.online).length;
     $('#s-exit').textContent=ns.filter(n=>n.exitApproved).length;
+    $('#s-old').textContent=ns.filter(n=>n.app&&n.app.status==='old').length;
     $('#updated').textContent='Updated '+new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit',second:'2-digit'});
   }catch(e){ $('#updated').textContent='Could not load: '+e.message; }
 }

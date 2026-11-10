@@ -70,10 +70,64 @@ def hs(method, path, body=None):
         return 502, {"error": f"headscale not reachable: {e}"}
 
 
-def node_view(n):
+def load_releases():
+    """releases.json (made by install.sh from git): release commits and the newest version."""
+    try:
+        with open(os.path.join(HERE, "releases.json")) as f:
+            d = json.load(f)
+        return {"commits": dict(d.get("commits") or {}), "latest": str(d.get("latest") or "")}
+    except (OSError, ValueError, AttributeError):
+        return {"commits": {}, "latest": ""}
+
+
+RELEASES = load_releases()
+VER_RE = re.compile(r"^[0-9.]+-t([0-9a-f]{7,40})")
+
+
+def vkey(v):
+    return tuple(int(x) for x in v.split(".") if x.isdigit())
+
+
+def app_version(raw):
+    """What a device's reported version (e.g. 1.105.0-tfd7dc84b3) means.
+
+    TapperVPN builds carry the git commit they were built from; that commit's VERSION is the
+    TapperVPN release. Other clients (a GL.iNet router's stock Tailscale) show as reported.
+    """
+    if not raw:
+        return {"raw": "", "release": "", "status": "unknown"}
+    m = VER_RE.match(raw)
+    rel = ""
+    if m:
+        h = m.group(1)
+        rel = next((v for c, v in RELEASES["commits"].items() if c.startswith(h)), "")
+    latest = RELEASES["latest"]
+    if not rel:
+        status = "other"
+    elif latest and vkey(rel) < vkey(latest):
+        status = "old"
+    else:
+        status = "current"
+    return {"raw": raw, "release": rel, "status": status}
+
+
+def diag_versions():
+    try:
+        with open(DIAG_STATE) as f:
+            return json.load(f).get("versions") or {}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def node_view(n, versions=None):
     approved = set(n.get("approvedRoutes") or [])
     available = set(n.get("availableRoutes") or [])
+    ips = n.get("ipAddresses") or []
+    v4 = next((i for i in ips if "." in i), "")
+    info = (versions or {}).get(v4) or {}
     return {
+        "app": dict(app_version(info.get("version", "")), os=info.get("os", ""),
+                    model=info.get("model", "")),
         "id": n["id"],
         "name": n.get("givenName") or n.get("name"),
         "hostname": n.get("name"),
@@ -275,9 +329,10 @@ class Handler(BaseHTTPRequestHandler):
             code, d = hs("GET", "/api/v1/node")
             if code != 200:
                 return self.send_json(code, d)
-            nodes = sorted((node_view(n) for n in d.get("nodes", [])),
+            vers = diag_versions()
+            nodes = sorted((node_view(n, vers) for n in d.get("nodes", [])),
                            key=lambda n: (not n["online"], n["name"].lower()))
-            self.send_json(200, {"nodes": nodes})
+            self.send_json(200, {"nodes": nodes, "latest": RELEASES["latest"]})
         elif path == "/api/pending":
             self.send_json(200, {"pending": pending_logins()})
         elif path == "/api/diag":

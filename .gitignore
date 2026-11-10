@@ -19,3 +19,4 @@ data/
 # Windows installer build (installer/tappervpn.iss)
 dist/
 installer/payload/
+server/vpn-admin/releases.json
