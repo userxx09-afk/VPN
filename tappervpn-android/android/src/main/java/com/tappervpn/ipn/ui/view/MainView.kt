@@ -221,6 +221,7 @@ fun MainView(
           Ipn.State.Running -> {
             viewModel.maybeRequestVpnPermission()
             LaunchVpnPermissionIfNeeded(viewModel)
+            UsageAccessNotice()
             PromptForMissingPermissions(viewModel)
 
             if (showKeyExpiry) {
