@@ -6,11 +6,13 @@
 # Trust: SHA256SUMS must carry a valid usign signature from the key in
 # /usr/share/tappervpn/release.pub, and the package must match its line.
 
-REPO=userxx09-afk/VPN
+# Releases live in the public releases-only repo; vpn-latest always holds the
+# newest version, titled "TapperVPN <version>".
+REPO=userxx09-afk/prod
 PUB=/usr/share/tappervpn/release.pub
 ARCH=$(cat /usr/share/tappervpn/arch 2>/dev/null)
 WORK=/tmp/tappervpn-update
-API=https://api.github.com/repos/$REPO/releases/latest
+API=https://api.github.com/repos/$REPO/releases/tags/vpn-latest
 
 log() { logger -t tappervpn-update "$*"; echo "$*"; }
 fail() { log "$*"; rm -rf "$WORK"; exit 1; }
@@ -35,7 +37,7 @@ command -v usign >/dev/null || fail "usign not found; can't verify updates, so n
 
 rm -rf "$WORK"; mkdir -p "$WORK"
 fetch "$API" "$WORK/release.json" || fail "can't reach GitHub"
-latest=$(jsonfilter -i "$WORK/release.json" -e '@.tag_name'); latest=${latest#v}
+latest=$(jsonfilter -i "$WORK/release.json" -e '@.name'); latest=${latest##* }; latest=${latest#v}
 installed=$(opkg status tappervpn | sed -n 's/^Version: //p')
 [ -n "$latest" ] || fail "no releases published yet"
 

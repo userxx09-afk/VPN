@@ -1,5 +1,6 @@
 # Builds, signs and publishes a TapperVPN release. Every device updates from
-# the release this makes (github.com/userxx09-afk/VPN/releases).
+# the release this makes (github.com/userxx09-afk/prod/releases, tags vpn-v<version>
+# and the rolling vpn-latest).
 #
 # Usually you don't need this: pushing a new VERSION to main makes GitHub do
 # the same (.github/workflows/release.yml). This is for releasing from the PC
@@ -9,9 +10,10 @@
 #   2. scripts\release.ps1                 # build + sign into bin\release\<version>
 #      scripts\release.ps1 -Publish        # ...and upload it as a GitHub release
 #
-# -Publish needs a GitHub token with "contents: write" on the repo in
+# -Publish needs a GitHub token with "contents: write" on the prod repo in
 # $env:GITHUB_TOKEN. Without -Publish, upload the files in bin\release\<version>
-# yourself: GitHub > Releases > Draft a new release, tag v<version>.
+# yourself: GitHub > userxx09-afk/prod > Releases > Draft a new release, tag vpn-v<version>,
+# and replace the vpn-latest release with the same files (title "TapperVPN <version>").
 #
 # Signing uses %USERPROFILE%\.tappervpn\release.key (tappervpn-release keygen).
 # The Android APK is signed with this PC's Android debug key
@@ -24,7 +26,7 @@ param(
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
-$repo = "userxx09-afk/VPN"
+$repo = "userxx09-afk/prod"
 $version = (Get-Content "$root\VERSION" -Raw).Trim()
 if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "VERSION must look like 1.2.3, got '$version'" }
 $out = "$root\bin\release\$version"
@@ -117,7 +119,7 @@ if (-not $Publish) {
 # --- Publish to GitHub Releases ---
 if (-not $env:GITHUB_TOKEN) { throw "Set `$env:GITHUB_TOKEN (contents: write on $repo) to publish." }
 $headers = @{ Authorization = "Bearer $env:GITHUB_TOKEN"; Accept = "application/vnd.github+json" }
-$body = @{ tag_name = "v$version"; target_commitish = $commit; name = "TapperVPN $version"; draft = $true } | ConvertTo-Json
+$body = @{ tag_name = "vpn-v$version"; target_commitish = "main"; name = "TapperVPN $version"; draft = $true; make_latest = "false" } | ConvertTo-Json
 $rel = Invoke-RestMethod -Method Post -Headers $headers -Body $body "https://api.github.com/repos/$repo/releases"
 foreach ($f in Get-ChildItem $out) {
     Write-Host "uploading $($f.Name)"
@@ -127,4 +129,20 @@ foreach ($f in Get-ChildItem $out) {
 # Publish only once every file is up, so no device sees a half-uploaded release.
 Invoke-RestMethod -Method Patch -Headers $headers -Body (@{ draft = $false } | ConvertTo-Json) `
     "https://api.github.com/repos/$repo/releases/$($rel.id)" | Out-Null
-Write-Host "Published $($rel.html_url -replace '/tag/untagged-.*', "/tag/v$version")"
+Write-Host "Published $($rel.html_url -replace '/tag/untagged-.*', "/tag/vpn-v$version")"
+
+# Refresh the rolling vpn-latest release, which every device checks.
+try {
+    $old = Invoke-RestMethod -Headers $headers "https://api.github.com/repos/$repo/releases/tags/vpn-latest"
+    Invoke-RestMethod -Method Delete -Headers $headers "https://api.github.com/repos/$repo/releases/$($old.id)" | Out-Null
+    Invoke-RestMethod -Method Delete -Headers $headers "https://api.github.com/repos/$repo/git/refs/tags/vpn-latest" | Out-Null
+} catch { }
+$body = @{ tag_name = "vpn-latest"; target_commitish = "main"; name = "TapperVPN $version"; draft = $true; make_latest = "false" } | ConvertTo-Json
+$rel = Invoke-RestMethod -Method Post -Headers $headers -Body $body "https://api.github.com/repos/$repo/releases"
+foreach ($f in Get-ChildItem $out) {
+    $url = "https://uploads.github.com/repos/$repo/releases/$($rel.id)/assets?name=$($f.Name)"
+    Invoke-RestMethod -Method Post -Headers $headers -ContentType "application/octet-stream" -InFile $f.FullName $url | Out-Null
+}
+Invoke-RestMethod -Method Patch -Headers $headers -Body (@{ draft = $false } | ConvertTo-Json) `
+    "https://api.github.com/repos/$repo/releases/$($rel.id)" | Out-Null
+Write-Host "vpn-latest now holds $version. (The Windows installer workflow adds TapperVPN-Setup.exe.)"

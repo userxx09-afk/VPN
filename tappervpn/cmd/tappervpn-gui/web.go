@@ -132,7 +132,7 @@ func (s *webServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				err = webbrowser.Open(u)
 			}
 		case "releases":
-			err = webbrowser.Open("https://github.com/userxx09-afk/VPN/releases")
+			err = webbrowser.Open("https://github.com/userxx09-afk/prod/releases/tag/vpn-latest")
 		}
 	default:
 		http.NotFound(w, r)

@@ -19,6 +19,7 @@ lost; every device had to be reinstalled by hand.
 
 Put the new version in `VERSION` and push to `main`:
 `.github/workflows/release.yml` builds, signs and publishes every platform and
-the Windows installer. A push that changes that workflow but not `VERSION` is a
+the Windows installer to the public releases-only repo `userxx09-afk/prod`
+(`vpn-v<version>` plus the rolling `vpn-latest` that every device checks). A push that changes that workflow but not `VERSION` is a
 dry run. The signing keys are the repository secrets `TAPPERVPN_RELEASE_KEY`
-and `ANDROID_DEBUG_KEYSTORE`.
+and `ANDROID_DEBUG_KEYSTORE`; publishing to prod uses `PROD_REPO_TOKEN`.

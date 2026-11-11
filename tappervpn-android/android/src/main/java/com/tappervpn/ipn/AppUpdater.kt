@@ -34,7 +34,9 @@ import libtappervpn.Libtappervpn
 import org.json.JSONObject
 
 /**
- * Keeps the app up to date from GitHub Releases (github.com/userxx09-afk/VPN).
+ * Keeps the app up to date from GitHub Releases in the public releases-only repo
+ * github.com/userxx09-afk/prod (the source repo is private): the rolling "vpn-latest"
+ * release there holds the newest version, named "TapperVPN <version>".
  *
  * Once a day [UpdateCheckWorker] looks at the latest release. If it is newer than
  * [BuildConfig.TAPPERVPN_VERSION], it downloads SHA256SUMS and its signature, checks the
@@ -46,7 +48,8 @@ import org.json.JSONObject
 object AppUpdater {
   private const val TAG = "AppUpdater"
   private const val WORK_NAME = "app-update-check"
-  private const val REPO = "userxx09-afk/VPN"
+  private const val REPO = "userxx09-afk/prod"
+  private const val LATEST_TAG = "vpn-latest"
   const val APK_ASSET = "tappervpn-android.apk"
   private const val PREFS = "app-updater"
   private const val PREF_READY_VERSION = "ready-version"
@@ -76,8 +79,11 @@ object AppUpdater {
   /** Checks GitHub and downloads a verified newer APK. Returns its version, or null. */
   suspend fun checkAndDownload(context: Context): String? =
       withContext(Dispatchers.IO) {
-        val release = JSONObject(fetch("https://api.github.com/repos/$REPO/releases/latest").decodeToString())
-        val version = release.getString("tag_name").removePrefix("v")
+        val release = JSONObject(fetch("https://api.github.com/repos/$REPO/releases/tags/$LATEST_TAG").decodeToString())
+        // The title ends with the version ("TapperVPN 0.2.15"). Only the signed
+        // SHA256SUMS below is trusted for what gets installed.
+        val version = release.optString("name").trim().substringAfterLast(' ').removePrefix("v")
+        if (version.isEmpty()) error("$LATEST_TAG release has no version in its title")
         prefs(context).edit().putLong(PREF_LAST_CHECK, System.currentTimeMillis()).apply()
         if (readyVersion(context) == version) {
           return@withContext version // already downloaded and verified
