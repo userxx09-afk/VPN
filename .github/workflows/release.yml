@@ -52,6 +52,16 @@ jobs:
       OUT: ${{ github.workspace }}/bin/release/out
       STAGE: ${{ github.workspace }}/bin/release/stage
     steps:
+      # The Android build needs more disk than a runner has free (0.2.16 failed with
+      # "no space left on device"); drop big preinstalled toolchains this job never uses.
+      - name: Free disk space
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost \
+            /usr/share/swift /usr/local/share/powershell /opt/hostedtoolcache/CodeQL \
+            /usr/local/lib/node_modules /usr/local/julia* /opt/az /usr/share/miniconda || true
+          sudo docker image prune -af >/dev/null 2>&1 || true
+          df -h / | tail -1
       - uses: actions/checkout@v4
 
       - name: Version
