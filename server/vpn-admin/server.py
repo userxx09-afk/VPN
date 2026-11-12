@@ -350,6 +350,20 @@ class Handler(BaseHTTPRequestHandler):
     def deny(self):
         self.send_json(403, {"error": "Only available at home or over the VPN."})
 
+    def read_body(self, limit):
+        """The request body, sent with a length or chunked (OpenWrt's uclient-fetch chunks)."""
+        if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
+            out = b""
+            while len(out) <= limit:
+                size = int(self.rfile.readline(64).split(b";")[0].strip() or b"0", 16)
+                if size == 0:
+                    self.rfile.readline(64)          # the blank line after the last chunk
+                    break
+                out += self.rfile.read(min(size, limit + 1 - len(out)))
+                self.rfile.readline(64)              # CRLF after the chunk
+            return out[:limit]
+        return self.rfile.read(min(int(self.headers.get("Content-Length") or 0), limit))
+
     def router_checkin(self):
         """A router's once-a-minute report (form-encoded, from glinet's checkin script).
 
@@ -362,8 +376,7 @@ class Handler(BaseHTTPRequestHandler):
             body, code = b"unknown\n", 403
         else:
             try:
-                n = min(int(self.headers.get("Content-Length") or 0), 4096)
-                form = urllib.parse.parse_qs(self.rfile.read(n).decode(errors="replace"))
+                form = urllib.parse.parse_qs(self.read_body(4096).decode(errors="replace"))
             except ValueError:
                 form = {}
             report = {k: (form.get(k) or [""])[0][:200] for k in ROUTER_FIELDS}
