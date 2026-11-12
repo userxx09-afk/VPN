@@ -1,0 +1,101 @@
+#!/bin/sh
+# Checks in with the TapperVPN admin console once a minute (cron, see
+# /etc/init.d/tappervpn): reports this router's version and state, and runs
+# whatever the console asked for since the last check-in:
+#   update   install the newest signed release now (same as the nightly update)
+#   check    only see whether an update is waiting
+#   reapply  sign in again and rebuild the routing (like Save & Apply)
+#
+# The console is found by name (option admin_url, default vpnadmin.tapper.co,
+# a DNS-only record pointing at the server's VPN address). The name is looked
+# up through 1.1.1.1, since the router's own DNS may refuse answers that are
+# private addresses; if that fails, option admin_ip is used. Either way the
+# request travels over the VPN, which is how the console knows which router it is.
+
+. /lib/functions.sh
+
+STATE=/var/run/tappervpn/remote
+UPDATE=/usr/libexec/tappervpn/update
+LOCK=$STATE/busy
+
+config_load tappervpn
+config_get_bool enabled main enabled 0
+config_get_bool remote main remote_control 1
+[ "$enabled" = 1 ] && [ "$remote" = 1 ] || exit 0
+config_get url main admin_url 'http://vpnadmin.tapper.co:8096'
+config_get fallback main admin_ip '100.64.0.2'
+config_get mode main mode all
+config_get exit_node main exit_node
+config_get_bool auto_update main auto_update 1
+
+mkdir -p "$STATE"
+
+# --- where the console is ----------------------------------------------------
+hostport=${url#*://}; hostport=${hostport%%/*}
+host=${hostport%%:*}; port=${hostport#*:}
+[ "$port" = "$hostport" ] && port=80
+vpn_ip() { grep -oE '100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]+\.[0-9]+' | tail -n 1; }
+
+ip=
+if echo "$host" | grep -qE '^[0-9.]+$'; then
+	ip=$host
+elif [ -f "$STATE/ip" ] && [ -n "$(find "$STATE/ip" -mmin -60 2>/dev/null)" ]; then
+	ip=$(cat "$STATE/ip")                       # looked up in the last hour
+else
+	ip=$(nslookup "$host" 1.1.1.1 2>/dev/null | sed '1,2d' | vpn_ip)
+	[ -n "$ip" ] || ip=$(nslookup "$host" 2>/dev/null | sed '1,2d' | vpn_ip)
+	[ -n "$ip" ] && echo "$ip" >"$STATE/ip"
+fi
+[ -n "$ip" ] || ip=$fallback
+[ -n "$ip" ] || exit 0
+
+# --- what to report --------------------------------------------------------------
+# Form encoding, enough for these values (no newlines, & = + % #).
+enc() { printf '%s' "$1" | tr '\n\r&=+%#' '       ' | sed 's/ /+/g'; }
+
+version=$(opkg status tappervpn | sed -n 's/^Version: //p')
+arch=$(cat /usr/share/tappervpn/arch 2>/dev/null)
+model=$(cat /tmp/sysinfo/model 2>/dev/null)
+firmware=$(sed -n "s/^DISTRIB_DESCRIPTION='\(.*\)'/\1/p" /etc/openwrt_release 2>/dev/null)
+uptime=$(cut -d. -f1 /proc/uptime)
+busy=0; [ -f "$LOCK" ] && kill -0 "$(cat "$LOCK")" 2>/dev/null && busy=1
+last_action=$(cat "$STATE/last_action" 2>/dev/null)
+last_at=$(cat "$STATE/last_at" 2>/dev/null)
+last_ok=$(cat "$STATE/last_ok" 2>/dev/null)
+last_result=$(tail -n 1 "$STATE/last_out" 2>/dev/null | cut -c1-200)
+waiting=$(cat "$STATE/waiting" 2>/dev/null)
+
+body="v=1&version=$(enc "$version")&arch=$(enc "$arch")&model=$(enc "$model")&firmware=$(enc "$firmware")"
+body="$body&uptime=$uptime&mode=$(enc "$mode")&exit_node=$(enc "$exit_node")&auto_update=$auto_update"
+body="$body&busy=$busy&last_action=$(enc "$last_action")&last_at=$(enc "$last_at")&last_ok=$(enc "$last_ok")"
+body="$body&last_result=$(enc "$last_result")&waiting=$(enc "$waiting")"
+
+reply=$(uclient-fetch -q -T 15 -O - --post-data="$body" "http://$ip:$port/api/router/checkin" 2>/dev/null) || {
+	rm -f "$STATE/ip"                          # look the name up again next time
+	exit 0
+}
+cmd=$(echo "$reply" | head -n 1 | tr -cd 'a-z')
+
+# --- what the console asked for -----------------------------------------------------
+run() {   # run ACTION COMMAND...: in the background, remembering how it went
+	local action=$1; shift
+	[ "$busy" = 1 ] && return
+	(
+		sh -c 'echo $PPID' >"$LOCK"
+		echo "$action" >"$STATE/last_action"
+		date -u +%Y-%m-%dT%H:%M:%SZ >"$STATE/last_at"
+		logger -t tappervpn "admin console asked to $action"
+		if "$@" >"$STATE/last_out" 2>&1; then echo 1 >"$STATE/last_ok"; else echo 0 >"$STATE/last_ok"; fi
+		# "update available: 1.2 -> 1.3" from `update check` is worth showing on the console
+		sed -n 's/^update available: .* -> //p' "$STATE/last_out" | tail -n 1 >"$STATE/waiting"
+		grep -q '^up to date\|^installed ' "$STATE/last_out" && : >"$STATE/waiting"
+		rm -f "$LOCK"
+	) </dev/null >/dev/null 2>&1 &
+}
+
+case "$cmd" in
+update) run update "$UPDATE" ;;
+check) run check "$UPDATE" check ;;
+reapply) run reapply /etc/init.d/tappervpn restart ;;
+esac
+exit 0

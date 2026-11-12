@@ -93,6 +93,9 @@ select{font:inherit;font-size:14px;padding:8px 10px;border-radius:8px;border:1px
 .tblwrap{overflow-x:auto}
 .ver-old{color:var(--danger);font-weight:600}
 .ver-ok{color:var(--ok)}
+.router{padding-top:8px;border-top:1px solid var(--line);font-size:13px;display:grid;gap:6px}
+.router .btns{display:flex;gap:6px;flex-wrap:wrap}
+.router .note{color:var(--muted)}
 .tag{font-size:12px;padding:2px 8px;border-radius:99px;background:var(--bg);color:var(--muted);white-space:nowrap}
 .tag.good{background:var(--ok-soft);color:var(--ok)}
 .tag.warn{background:#fff4d6;color:#8a5a00}
@@ -247,12 +250,40 @@ function card(n){
       ${n.subnetRoutes.length?`<dt>Subnets</dt><dd class="mono">${esc(n.subnetRoutes.join(', '))}</dd>`:''}
     </dl>
     ${exit}
+    ${routerBox(n)}
     <div class="actions">
       <button data-act="rename" data-id="${n.id}" data-name="${esc(n.name)}">Rename</button>
       <button data-act="expire" data-id="${n.id}" data-name="${esc(n.name)}">Sign out</button>
       <button class="danger" data-act="delete" data-id="${n.id}" data-name="${esc(n.name)}">Remove</button>
     </div>
   </article>`;
+}
+
+// A GL.iNet router running the TapperVPN package checks in every minute (see glinet/.../checkin).
+function routerBox(n){
+  const r=n.router; if(!r) return '';
+  const id=n.id, act=r.last_action;
+  const names={update:'Update',check:'Update check',reapply:'Re-apply'};
+  let ver = r.outOfDate ? `<span class="ver-old">${esc(r.version)} – update available (${esc(r.latest)})</span>`
+          : r.version ? `<span class="ver-ok">${esc(r.version)}</span>` : '<span class="sub">unknown</span>';
+  if(r.waiting && !r.outOfDate) ver += ` <span class="ver-old">(${esc(r.waiting)} waiting)</span>`;
+  let last='';
+  if(r.busy==='1') last=`${names[act]||esc(act)} running now…`;
+  else if(act) last=`${names[act]||esc(act)} ${r.last_ok==='1'?'done':'<span class="ver-old">failed</span>'} ${esc(ago(r.last_at))}${r.last_result?': '+esc(r.last_result):''}`;
+  const pend = r.pending ? `<div>⏳ ${names[r.pending]} asked ${esc(ago(r.pendingAt))}; the router picks it up within a minute.
+      <button data-router="cancel" data-id="${id}">Cancel</button></div>` : '';
+  const off = r.pending || r.busy==='1' || r.stale;
+  return `<div class="router">
+    <div><b>Router</b> ${esc(r.model||'')} <span class="sub">${esc(r.firmware||'')}</span></div>
+    <div>TapperVPN ${ver}${r.auto_update==='1'?' <span class="sub">· updates nightly</span>':' <span class="sub">· nightly updates off</span>'}</div>
+    <div class="note">Mode: ${esc(r.mode||'?')}${r.exit_node?' via '+esc(r.exit_node):''} · checked in ${esc(ago(r.seen))}${r.stale?' <span class="ver-old">(not checking in)</span>':''}</div>
+    ${last?`<div class="note">${last}</div>`:''}
+    ${pend}
+    <div class="btns">
+      <button class="${r.outOfDate?'primary':''}" data-router="update" data-id="${id}" data-name="${esc(n.name)}" ${off?'disabled':''}>Update now</button>
+      <button data-router="check" data-id="${id}" ${off?'disabled':''}>Check for update</button>
+      <button data-router="reapply" data-id="${id}" data-name="${esc(n.name)}" ${off?'disabled':''}>Re-apply settings</button>
+    </div></div>`;
 }
 
 // The TapperVPN release a device runs, from the version it reports (see app_version in server.py).
@@ -281,6 +312,19 @@ async function load(){
     $('#updated').textContent='Updated '+new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit',second:'2-digit'});
   }catch(e){ $('#updated').textContent='Could not load: '+e.message; }
 }
+
+document.addEventListener('click', async e=>{
+  const b=e.target.closest('button[data-router]'); if(!b) return;
+  const {router:what,id,name}=b.dataset;
+  if(what==='update' && !confirm('Update TapperVPN on '+name+' now? The VPN on that router drops for about a minute while it installs.')) return;
+  if(what==='reapply' && !confirm('Re-apply settings on '+name+'? Its VPN reconnects (a few seconds).')) return;
+  b.disabled=true;
+  try{
+    await post(`/api/nodes/${id}/router`,{do:what});
+    toast(what==='cancel'?'Cancelled':'Sent. The router picks it up within a minute.');
+  }catch(err){ toast(err.message,true); }
+  load();
+});
 
 document.addEventListener('click', async e=>{
   const b=e.target.closest('button[data-act]'); if(!b) return;

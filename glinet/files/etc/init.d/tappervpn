@@ -10,27 +10,32 @@ STATE_DIR=/etc/tappervpn
 RUN_DIR=/var/run/tappervpn
 APPLY=/usr/libexec/tappervpn/apply
 UPDATE=/usr/libexec/tappervpn/update
+CHECKIN=/usr/libexec/tappervpn/checkin
 CRONTAB=/etc/crontabs/root
 
-# Daily update check at a per-router minute, so routers don't all hit GitHub at once.
-set_update_cron() {
-	local want=$1 line
+# Daily update check at a per-router minute, so routers don't all hit GitHub at once;
+# and a check-in with the admin console every minute (so it can show this router and
+# start updates), when remote_control is on.
+set_cron() {
+	local update=$1 checkin=$2 line
 	touch "$CRONTAB"
-	sed -i "\#$UPDATE#d" "$CRONTAB"
-	if [ "$want" = 1 ]; then
+	sed -i -e "\#$UPDATE#d" -e "\#$CHECKIN#d" "$CRONTAB"
+	if [ "$update" = 1 ]; then
 		line="$(awk 'BEGIN { srand(); print int(rand() * 60) }') 4 * * * $UPDATE"
 		echo "$line" >>"$CRONTAB"
 	fi
+	[ "$checkin" = 1 ] && echo "* * * * * $CHECKIN" >>"$CRONTAB"
 	/etc/init.d/cron restart 2>/dev/null
 }
 
 start_service() {
 	config_load tappervpn
-	local enabled port auto_update
+	local enabled port auto_update remote
 	config_get_bool enabled main enabled 0
 	config_get port main port 41642
 	config_get_bool auto_update main auto_update 1
-	set_update_cron "$auto_update"
+	config_get_bool remote main remote_control 1
+	set_cron "$auto_update" "$([ "$enabled" = 1 ] && echo "$remote")"
 	[ "$enabled" = 1 ] || {
 		"$APPLY" teardown
 		return 0

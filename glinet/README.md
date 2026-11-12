@@ -58,6 +58,29 @@ latest GitHub release, checks `SHA256SUMS.sig` with `usign` against
 `/usr/libexec/tappervpn/update check` to see if an update is waiting; logs:
 `logread -e tappervpn-update`. Set `auto_update` to `0` to turn it off.
 
+## From the admin console
+
+Each router checks in with the admin console once a minute
+(`/usr/libexec/tappervpn/checkin`, cron), so its card on the console shows the
+router model, firmware, TapperVPN version, mode and exit node, plus three buttons:
+**Update now** (install the newest signed release), **Check for update** and
+**Re-apply settings** (sign in again and rebuild the routing, like Save & Apply).
+The router picks the request up on its next check-in and reports how it went.
+
+The console can't log in to the router; the router asks it. It finds the console at
+`admin_url` (default `http://vpnadmin.tapper.co:8096`), looked up through 1.1.1.1
+because the router's own DNS may refuse private-address answers, and falls back to
+`admin_ip` (default `100.64.0.2`, tapper's VPN address). The check-in travels over
+the VPN; the console uses the sender's VPN address to know which router it is and
+ignores check-ins from anywhere else.
+
+One-time DNS setup in Cloudflare (zone tapper.co): an **A** record `vpnadmin` →
+`100.64.0.2`, proxy status **DNS only** (grey cloud). It never goes through the
+Cloudflare tunnel, which the console refuses anyway; the address only works over the VPN.
+
+Turn it off with `option remote_control '0'` (Services > TapperVPN: "Allow the
+admin console to update this router").
+
 ## How it works
 
 - `tappervpnd` is our Tailscale fork built for Linux with only router features

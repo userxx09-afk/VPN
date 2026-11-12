@@ -34,6 +34,7 @@ ALLOWED_NETS = [ipaddress.ip_network(n) for n in (
     "100.64.0.0/10",          # VPN IPv4
     "fd7a:115c:a1e0::/48",    # VPN IPv6
 )]
+VPN_NETS = ALLOWED_NETS[3:5]   # router check-ins only count over the VPN
 EXIT_ROUTES = {"0.0.0.0/0", "::/0"}
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 AUTH_RE = re.compile(r"^hskey-authreq-[A-Za-z0-9_-]{6,64}$")
@@ -144,6 +145,7 @@ def node_view(n, versions=None):
         "tags": n.get("tags") or [],
         "workstation": WS_TAG in (n.get("tags") or []),
         "server": SERVER_TAG in (n.get("tags") or []),
+        "router": router_view(n["id"]),
     }
 
 
@@ -270,6 +272,44 @@ def diag(device):
     return st
 
 
+# --- routers (GL.iNet package): they check in every minute, see glinet/.../checkin ---
+ROUTER_CMDS = ("update", "check", "reapply")
+ROUTER_FIELDS = ("version", "arch", "model", "firmware", "uptime", "mode", "exit_node", "auto_update",
+                 "busy", "last_action", "last_at", "last_ok", "last_result", "waiting")
+routers = {}         # node id -> last check-in report (+ "seen", "ip")
+router_cmds = {}     # node id -> {"do": command, "at": when asked}
+_node_cache = {"at": None, "by_ip": {}}
+
+
+def node_for_ip(ip):
+    """The headscale node that has this VPN address (cached 30 s)."""
+    now = datetime.now(timezone.utc)
+    if not _node_cache["at"] or now - _node_cache["at"] > timedelta(seconds=30) or ip not in _node_cache["by_ip"]:
+        code, d = hs("GET", "/api/v1/node")
+        if code == 200:
+            _node_cache["by_ip"] = {a: str(n["id"]) for n in d.get("nodes", []) for a in (n.get("ipAddresses") or [])}
+            _node_cache["at"] = now
+    return _node_cache["by_ip"].get(ip)
+
+
+def router_view(nid):
+    r = routers.get(str(nid))
+    if not r:
+        return None
+    latest = RELEASES["latest"]
+    ver = r.get("version", "")
+    pending = router_cmds.get(str(nid))
+    return {
+        **{k: r.get(k, "") for k in ROUTER_FIELDS},
+        "seen": r["seen"],
+        "stale": datetime.now(timezone.utc) - datetime.fromisoformat(r["seen"]) > timedelta(minutes=3),
+        "outOfDate": bool(latest and ver and vkey(ver.split("-")[0]) < vkey(latest)),
+        "latest": latest,
+        "pending": pending["do"] if pending else "",
+        "pendingAt": pending["at"] if pending else "",
+    }
+
+
 def user_id(name):
     code, d = hs("GET", "/api/v1/user")
     if code != 200:
@@ -309,6 +349,38 @@ class Handler(BaseHTTPRequestHandler):
 
     def deny(self):
         self.send_json(403, {"error": "Only available at home or over the VPN."})
+
+    def router_checkin(self):
+        """A router's once-a-minute report (form-encoded, from glinet's checkin script).
+
+        Only over the VPN: the sender's VPN address says which router it is (WireGuard
+        addresses can't be faked). The reply is one line: a command, or "none".
+        """
+        ip = self.client_address[0].split("%")[0].removeprefix("::ffff:")
+        nid = node_for_ip(ip) if any(ipaddress.ip_address(ip) in net for net in VPN_NETS) else None
+        if not nid:
+            body, code = b"unknown\n", 403
+        else:
+            try:
+                n = min(int(self.headers.get("Content-Length") or 0), 4096)
+                form = urllib.parse.parse_qs(self.rfile.read(n).decode(errors="replace"))
+            except ValueError:
+                form = {}
+            report = {k: (form.get(k) or [""])[0][:200] for k in ROUTER_FIELDS}
+            report.update(seen=datetime.now(timezone.utc).isoformat(timespec="seconds"), ip=ip)
+            routers[nid] = report
+            cmd = router_cmds.pop(nid, None)
+            if cmd and report.get("busy") == "1":
+                router_cmds[nid] = cmd          # still busy with the last one: ask next time
+                cmd = None
+            if cmd:
+                print(f"router {ip} (node {nid}): sent {cmd['do']}", flush=True)
+            body, code = ((cmd["do"] if cmd else "none") + "\n").encode(), 200
+        self.send_response(code)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     # --- routes -----------------------------------------------------------
     def do_GET(self):
@@ -405,6 +477,8 @@ class Handler(BaseHTTPRequestHandler):
                                   "down": down, "up": up})
             del speed_results[:-50]
             return self.send_json(200, {"ok": True})
+        if path0 == "/api/router/checkin":
+            return self.router_checkin()
         if path0 == "/api/crash" and self.headers.get("X-VPN-Admin") == "1":
             # Crash report from the Android app (CrashReporter.kt): device info + stack trace.
             try:
@@ -436,7 +510,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(400, {"error": "bad JSON"})
 
         path = urllib.parse.urlparse(self.path).path
-        m = re.fullmatch(r"/api/nodes/([0-9]+)/(rename|delete|expire|exit|workstation)", path)
+        m = re.fullmatch(r"/api/nodes/([0-9]+)/(rename|delete|expire|exit|workstation|router)", path)
         if path == "/api/approve":
             key = str(body.get("code", "")).strip()
             key = key.rsplit("/", 1)[-1]  # allow pasting the whole login link
@@ -486,6 +560,17 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(404, {"error": "not found"})
 
         nid, action = m.group(1), m.group(2)
+        if action == "router":
+            do = str(body.get("do", ""))
+            if do == "cancel":
+                router_cmds.pop(nid, None)
+                return self.send_json(200, {"ok": True})
+            if do not in ROUTER_CMDS:
+                return self.send_json(400, {"error": "unknown router action"})
+            if nid not in routers:
+                return self.send_json(400, {"error": "This device hasn't checked in as a TapperVPN router."})
+            router_cmds[nid] = {"do": do, "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+            return self.send_json(200, {"ok": True})
         if action == "rename":
             name = str(body.get("name", "")).strip().lower()
             if not NAME_RE.match(name):
