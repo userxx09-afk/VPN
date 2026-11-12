@@ -102,7 +102,7 @@ installed one.
 ## Installing
 
 - **Windows**: download and run
-  [TapperVPN-Setup.exe](https://github.com/userxx09-afk/VPN/releases/latest/download/TapperVPN-Setup.exe).
+  [TapperVPN-Setup.exe](https://github.com/userxx09-afk/prod/releases/download/vpn-latest/TapperVPN-Setup.exe).
   It installs to `C:\Program Files\TapperVPN` (added to PATH), adds the
   `TapperVPN` service and the `TapperVPN Update` task, and opens the
   **TapperVPN app** (`tappervpn-gui.exe`, `tappervpn/cmd/tappervpn-gui`):

@@ -2,6 +2,13 @@
 # scripts\release.ps1 makes, then builds TapperVPN-Setup.exe for it. Every
 # device auto-updates from the release this publishes.
 #
+# Releases go to the public, releases-only repo userxx09-afk/prod (this source
+# repo is private): vpn-v<version>, plus the rolling vpn-latest that devices
+# check. That needs a third secret, PROD_REPO_TOKEN (fine-grained, Contents:
+# read and write on userxx09-afk/prod only). While this repo is still public,
+# each release is also published here so devices on older builds get the
+# update that moves them to prod; that stops once the repo is private.
+#
 # To release: change VERSION (e.g. 0.2.5) and push it to main. Or: Actions >
 # Release > Run workflow (releases whatever VERSION says on main).
 # A push that changes this workflow but not VERSION, or "dry run" ticked when
@@ -52,6 +59,7 @@ jobs:
         env:
           HAVE_RELEASE_KEY: ${{ secrets.TAPPERVPN_RELEASE_KEY != '' }}
           HAVE_ANDROID_KEY: ${{ secrets.ANDROID_DEBUG_KEYSTORE != '' }}
+          HAVE_PROD_TOKEN: ${{ secrets.PROD_REPO_TOKEN != '' }}
           DRY_INPUT: ${{ inputs.dry_run == true }}
           BEFORE: ${{ github.event.before }}
         run: |
@@ -67,16 +75,17 @@ jobs:
           echo "Dry run: $DRY_RUN"
           v=$(tr -d '[:space:]' < VERSION)
           [[ $v =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::VERSION must look like 1.2.3, got '$v'"; exit 1; }
-          if [ "$DRY_RUN" != true ] && gh release view "v$v" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "::error::Release v$v already exists. Put a newer version in VERSION."
+          if [ "$DRY_RUN" != true ] && gh release view "vpn-v$v" --repo userxx09-afk/prod >/dev/null 2>&1; then
+            echo "::error::Release vpn-v$v already exists in prod. Put a newer version in VERSION."
             exit 1
           fi
+          [ "$DRY_RUN" = true ] || [ "$HAVE_PROD_TOKEN" = true ] || { echo "::error::Add the PROD_REPO_TOKEN secret (see the top of this workflow)."; exit 1; }
           [ "$DRY_RUN" = true ] || [ "$HAVE_RELEASE_KEY" = true ] || { echo "::error::Add the TAPPERVPN_RELEASE_KEY secret (see the top of this workflow)."; exit 1; }
           [ "$DRY_RUN" = true ] || [ "$HAVE_ANDROID_KEY" = true ] || { echo "::error::Add the ANDROID_DEBUG_KEYSTORE secret (see the top of this workflow)."; exit 1; }
           engine=$(tr -d '[:space:]' < tappervpn/VERSION.txt)
           echo "VERSION=$v" >> "$GITHUB_ENV"
           echo "LDFLAGS=-s -w -X tappervpn.com/updater.Version=$v -X tappervpn.com/version.longStamp=$engine-t${GITHUB_SHA::9} -X tappervpn.com/version.shortStamp=$engine -X tappervpn.com/version.gitCommitStamp=$GITHUB_SHA" >> "$GITHUB_ENV"
-          echo "tag=v$v" >> "$GITHUB_OUTPUT"
+          echo "tag=vpn-v$v" >> "$GITHUB_OUTPUT"
           mkdir -p "$OUT" "$STAGE/windows" "$STAGE/server"
 
       - uses: actions/setup-go@v5
@@ -192,15 +201,33 @@ jobs:
           cd tappervpn && go run ./cmd/tappervpn-release sign "$OUT"
           ls -l "$OUT"
 
-      - name: Publish
+      - name: Publish to prod
         if: env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PROD_REPO_TOKEN }}
+          PROD: userxx09-afk/prod
+        run: |
+          # As drafts first, so no device sees a half-uploaded release.
+          tag=vpn-v$VERSION
+          gh release create "$tag" "$OUT"/* --repo "$PROD" \
+            --target main --title "TapperVPN $VERSION" --draft --notes "TapperVPN $VERSION, built from $GITHUB_REPOSITORY@$GITHUB_SHA."
+          gh release edit "$tag" --repo "$PROD" --draft=false --latest=false
+          # The rolling release devices check. Its title carries the version.
+          gh release delete vpn-latest --repo "$PROD" --yes --cleanup-tag 2>/dev/null || true
+          gh release create vpn-latest "$OUT"/* --repo "$PROD" \
+            --target main --title "TapperVPN $VERSION" --draft --notes "Always the newest TapperVPN. Every device updates from this release."
+          gh release edit vpn-latest --repo "$PROD" --draft=false --latest=false
+          echo "Published https://github.com/$PROD/releases/tag/$tag"
+
+      # Transition only: devices on builds from before the move still check this
+      # repo's latest release. Skipped once the repo is private.
+      - name: Publish here too (while this repo is public)
+        if: env.DRY_RUN != 'true' && github.event.repository.private != true
         run: |
           tag=v$VERSION
-          # As a draft first, so no device sees a half-uploaded release.
           gh release create "$tag" "$OUT"/* --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" --title "TapperVPN $VERSION" --draft --generate-notes
           gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest
-          echo "Published https://github.com/$GITHUB_REPOSITORY/releases/tag/$tag"
 
       - name: Keep the unsigned build (dry run)
         if: env.DRY_RUN == 'true'
@@ -215,6 +242,7 @@ jobs:
     needs: build
     if: needs.build.outputs.dry_run != 'true'
     uses: ./.github/workflows/windows-installer.yml
+    secrets: inherit
     with:
       tag: ${{ needs.build.outputs.tag }}
       attach: true

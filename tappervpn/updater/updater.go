@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 // Package updater finds, downloads and verifies TapperVPN releases published
-// on GitHub (github.com/userxx09-afk/VPN).
+// on GitHub, in the public releases-only repo github.com/userxx09-afk/prod
+// (the source repo is private). The rolling "vpn-latest" release there always
+// carries the newest version's assets; its title ends with the version.
 //
 // Every release carries SHA256SUMS (one "<hex>  <file name>" line per asset)
 // and SHA256SUMS.sig, an ed25519 signature over SHA256SUMS in usign format so
@@ -39,7 +41,11 @@ import (
 var Version = "0.0.0-dev"
 
 // Repo is the GitHub repository whose releases are checked.
-const Repo = "userxx09-afk/VPN"
+const Repo = "userxx09-afk/prod"
+
+// LatestTag is the rolling release in Repo that holds the newest TapperVPN.
+// Repo also holds other apps' releases, so GitHub's own "latest" isn't used.
+const LatestTag = "vpn-latest"
 
 // ReleasePub is the usign-format public key release signatures must verify against.
 //
@@ -61,7 +67,7 @@ var client = &http.Client{Timeout: 10 * time.Minute}
 
 // Latest returns the newest published (non-draft, non-prerelease) release.
 func Latest(ctx context.Context) (*Release, error) {
-	url := "https://api.github.com/repos/" + Repo + "/releases/latest"
+	url := "https://api.github.com/repos/" + Repo + "/releases/tags/" + LatestTag
 	body, err := get(ctx, url, 1<<20)
 	if err != nil {
 		if strings.Contains(err.Error(), "404") {
@@ -71,6 +77,7 @@ func Latest(ctx context.Context) (*Release, error) {
 	}
 	var gh struct {
 		TagName string `json:"tag_name"`
+		Name    string `json:"name"`
 		Assets  []struct {
 			Name string `json:"name"`
 			URL  string `json:"browser_download_url"`
@@ -79,11 +86,26 @@ func Latest(ctx context.Context) (*Release, error) {
 	if err := json.Unmarshal(body, &gh); err != nil {
 		return nil, fmt.Errorf("parsing release: %w", err)
 	}
-	r := &Release{Version: strings.TrimPrefix(gh.TagName, "v"), Assets: map[string]string{}}
+	r := &Release{Version: releaseVersion(gh.TagName, gh.Name), Assets: map[string]string{}}
 	for _, a := range gh.Assets {
 		r.Assets[a.Name] = a.URL
 	}
 	return r, nil
+}
+
+// releaseVersion is the version a release is for: from a "vpn-v1.2.3" or
+// "v1.2.3" tag, or, for the rolling vpn-latest release, the last word of its
+// title ("TapperVPN 1.2.3"). The assets are still only trusted once their
+// signed SHA256SUMS verifies, whatever the title says.
+func releaseVersion(tag, name string) string {
+	if v := strings.TrimPrefix(strings.TrimPrefix(tag, "vpn-"), "v"); v != tag && v != "latest" && v != "vpn-latest" {
+		return v
+	}
+	f := strings.Fields(name)
+	if len(f) == 0 {
+		return ""
+	}
+	return strings.TrimPrefix(f[len(f)-1], "v")
 }
 
 // IsNewer reports whether release version v is newer than current.
