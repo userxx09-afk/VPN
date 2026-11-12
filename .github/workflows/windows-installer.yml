@@ -49,6 +49,8 @@ jobs:
       # prod is public, so reading works with this repo's own token; attaching
       # needs PROD_REPO_TOKEN.
       GH_TOKEN: ${{ secrets.PROD_REPO_TOKEN || github.token }}
+      # The prod-only token can't read this repo; reads from here use this.
+      OWN_TOKEN: ${{ github.token }}
       PROD: userxx09-afk/prod
       TAG: ${{ inputs.tag }}
     steps:
@@ -74,6 +76,7 @@ jobs:
               # test-build from this repo's own latest release instead.
               $global:LASTEXITCODE = 0
               $relRepo = $env:GITHUB_REPOSITORY
+              $env:GH_TOKEN = $env:OWN_TOKEN
               $tag = gh release view --repo $relRepo --json tagName --jq .tagName
             }
           }
@@ -87,6 +90,7 @@ jobs:
       - name: Download and check the signed Windows zip
         shell: pwsh
         run: |
+          if ($env:REL_REPO -ne $env:PROD) { $env:GH_TOKEN = $env:OWN_TOKEN }
           gh release download $env:TAG --repo $env:REL_REPO --dir dl `
             --pattern tappervpn-windows-amd64.zip --pattern SHA256SUMS --pattern SHA256SUMS.sig
           # Signature: the same check devices make, against tappervpn/updater/release.pub.
