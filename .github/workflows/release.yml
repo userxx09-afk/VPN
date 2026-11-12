@@ -229,6 +229,17 @@ jobs:
           gh release edit vpn-latest --repo "$PROD" --draft=false --latest=false
           echo "Published https://github.com/$PROD/releases/tag/$tag"
 
+      # The Tapper Dashboard reads this to tell which release each device's build is.
+      - name: Release map for the dashboard (releases.json)
+        if: env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PROD_REPO_TOKEN }}
+          PROD: userxx09-afk/prod
+        run: |
+          git fetch -q --unshallow origin || true
+          python3 scripts/make-releases.py "$RUNNER_TEMP/releases.json"
+          gh release upload vpn-latest "$RUNNER_TEMP/releases.json" --repo "$PROD" --clobber
+
       # Transition only: devices on builds from before the move still check this
       # repo's latest release. Skipped once the repo is private.
       - name: Publish here too (while this repo is public)

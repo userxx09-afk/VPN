@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Writes releases.json for the admin page: each release commit and its TapperVPN version.
+"""Writes releases.json for the Tapper Dashboard: each release commit and its TapperVPN version.
 
 Apps report the commit they were built from (e.g. 1.105.0-tfd7dc84b3); each commit's
 VERSION file names the release it belongs to.
-Run from a git checkout of this repo:  python3 server/vpn-admin/make-releases.py [out]
+The release workflow publishes it next to the builds (vpn-latest/releases.json).
+Run from a git checkout with full history:  python3 scripts/make-releases.py [out]
 """
 import json
 import os
@@ -11,7 +12,7 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.normpath(os.path.join(HERE, "..", ".."))
+ROOT = os.path.normpath(os.path.join(HERE, ".."))
 
 
 def git(*args):
@@ -19,7 +20,7 @@ def git(*args):
 
 
 def main():
-    out = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "releases.json")
+    out = sys.argv[1] if len(sys.argv) > 1 else "releases.json"
     # Every commit maps to the VERSION in effect there, not just the commits that changed
     # VERSION: a build from a later fix-up commit (e.g. a workflow tweak after "Release
     # 0.2.15") is still that release.

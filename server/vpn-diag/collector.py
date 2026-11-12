@@ -10,7 +10,7 @@ Every few seconds it records, for every device on the VPN:
     connection tracker); "no reply" ones are blocked or unreachable
 and keeps a log of notable events (went offline, fell back to a relay, slow).
 
-The admin page (vpn-admin, which has no privileges) reads the results:
+The Tapper Dashboard (repo userxx09-afk/dashboard; no privileges) reads the results:
   /run/vpn-diag/state.json       latest snapshot
   /var/lib/vpn-diag/events.jsonl event log, one JSON object per line
 Stdlib only.
