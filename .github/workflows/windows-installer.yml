@@ -63,21 +63,31 @@ jobs:
         shell: pwsh
         run: |
           $tag = $env:TAG
+          $relRepo = $env:PROD
           if (-not $tag) {
             # vpn-latest's title ends with the version: "TapperVPN 1.2.3".
-            $name = gh release view vpn-latest --repo $env:PROD --json name --jq .name
-            $tag = "vpn-v" + ($name -split '\s+')[-1].TrimStart('v')
+            $name = gh release view vpn-latest --repo $env:PROD --json name --jq .name 2>$null
+            if ($LASTEXITCODE -eq 0 -and $name) {
+              $tag = "vpn-v" + ($name -split '\s+')[-1].TrimStart('v')
+            } else {
+              # Nothing in prod yet (before the first release after the move):
+              # test-build from this repo's own latest release instead.
+              $global:LASTEXITCODE = 0
+              $relRepo = $env:GITHUB_REPOSITORY
+              $tag = gh release view --repo $relRepo --json tagName --jq .tagName
+            }
           }
-          if ($tag -match '^v\d') { $tag = "vpn-$tag" }
-          if ($tag -notmatch '^vpn-v(\d+\.\d+\.\d+)$') { throw "tag '$tag' doesn't look like vpn-v1.2.3" }
+          if ($tag -match '^v\d' -and $relRepo -eq $env:PROD) { $tag = "vpn-$tag" }
+          if ($tag -notmatch '^(?:vpn-)?v(\d+\.\d+\.\d+)$') { throw "tag '$tag' doesn't look like vpn-v1.2.3" }
           "TAG=$tag" >> $env:GITHUB_ENV
+          "REL_REPO=$relRepo" >> $env:GITHUB_ENV
           "VERSION=$($Matches[1])" >> $env:GITHUB_ENV
           Write-Host "Building the installer for $tag"
 
       - name: Download and check the signed Windows zip
         shell: pwsh
         run: |
-          gh release download $env:TAG --repo $env:PROD --dir dl `
+          gh release download $env:TAG --repo $env:REL_REPO --dir dl `
             --pattern tappervpn-windows-amd64.zip --pattern SHA256SUMS --pattern SHA256SUMS.sig
           # Signature: the same check devices make, against tappervpn/updater/release.pub.
           Push-Location tappervpn
