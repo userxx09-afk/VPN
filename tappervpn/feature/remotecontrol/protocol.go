@@ -132,12 +132,13 @@ const (
 type Codec string
 
 const (
-	// CodecJPEGTiles is a dependency-free encoding: the frame is split into a
-	// grid of tiles and only changed (dirty) tiles are sent, each as a JPEG.
-	// It is the Windows v1 default and the universal fallback.
-	CodecJPEGTiles Codec = "jpeg-tiles"
-	// CodecH264 is an H.264 Annex-B elementary stream, used where a hardware
-	// encoder is available (Android/Fire TV via MediaCodec).
+	// CodecMJPEG is the universal baseline: each frame is a complete JPEG.
+	// Every platform can both encode it (GDI/Bitmap) and decode it with only
+	// standard-library/OS facilities, so it is the codec that always negotiates.
+	// It trades bandwidth for simplicity and zero codec dependencies.
+	CodecMJPEG Codec = "mjpeg"
+	// CodecH264 is an H.264 Annex-B elementary stream, a future optimization for
+	// pairs where both ends have a hardware codec. Not yet offered end to end.
 	CodecH264 Codec = "h264"
 )
 

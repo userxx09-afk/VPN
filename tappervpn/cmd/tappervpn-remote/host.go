@@ -61,8 +61,10 @@ func (l *linkWriter) control(m rc.AgentMessage) error {
 	return l.frame(rc.ChControl, b)
 }
 
-// runHostHelper drives the host side over link until it closes or ctx ends.
-func runHostHelper(ctx context.Context, link io.ReadWriter, p HostPlatform, logf func(string, ...any)) error {
+// runHostHelper drives the helper's link to the daemon until it closes or ctx
+// ends: it serves host requests (consent/capture/input) and launches a
+// controller session when the daemon asks (control-start).
+func runHostHelper(ctx context.Context, link io.ReadWriter, p Platform, logf func(string, ...any)) error {
 	lw := &linkWriter{w: link}
 
 	// Announce capabilities first; the daemon waits for this before advertising
@@ -129,6 +131,8 @@ func runHostHelper(ctx context.Context, link io.ReadWriter, p HostPlatform, logf
 				p.SessionStart(m.PeerName)
 			case "session-end":
 				p.SessionEnd()
+			case "control-start":
+				go startControlling(ctx, m.PeerID, m.PeerName, p, logf)
 			}
 		}
 	}

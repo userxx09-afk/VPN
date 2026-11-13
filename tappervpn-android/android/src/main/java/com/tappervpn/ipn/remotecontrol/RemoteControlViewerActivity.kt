@@ -6,35 +6,32 @@ package com.tappervpn.ipn.remotecontrol
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
-import android.media.MediaCodec
-import android.media.MediaFormat
+import android.graphics.BitmapFactory
+import android.graphics.Rect
 import android.os.Bundle
 import android.view.KeyEvent
 import android.view.MotionEvent
-import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import com.tappervpn.ipn.util.TSLog
-import java.nio.ByteBuffer
 import kotlin.concurrent.thread
 
 /**
- * Controller viewer: shows the remote device's H.264 screen stream and forwards
- * this device's remote/keyboard/touch input to it. Implements the Go-declared
- * [libtappervpn.RemoteControlViewer]; the blocking connect runs on a worker
- * thread and this Activity finishes when the session ends.
+ * Controller viewer: shows the remote device's MJPEG screen stream (one JPEG per
+ * frame) and forwards this device's remote/keyboard/touch input to it.
+ * Implements the Go-declared [libtappervpn.RemoteControlViewer]; the blocking
+ * connect runs on a worker thread and this Activity finishes when the session
+ * ends.
  */
 class RemoteControlViewerActivity : Activity(), libtappervpn.RemoteControlViewer {
   private val TAG = "RemoteControlViewer"
 
   private lateinit var surfaceView: SurfaceView
-  @Volatile private var surface: Surface? = null
-  @Volatile private var decoder: MediaCodec? = null
+  @Volatile private var surfaceReady = false
 
   // Negotiated host screen size, used to map local touches to host coordinates.
   @Volatile private var hostW = 0
   @Volatile private var hostH = 0
-  @Volatile private var started = false
 
   private val app by lazy { RemoteControlManager.application() }
 
@@ -45,14 +42,13 @@ class RemoteControlViewerActivity : Activity(), libtappervpn.RemoteControlViewer
     surfaceView.holder.addCallback(
         object : SurfaceHolder.Callback {
           override fun surfaceCreated(holder: SurfaceHolder) {
-            surface = holder.surface
-            maybeStartDecoder()
+            surfaceReady = true
           }
 
           override fun surfaceChanged(holder: SurfaceHolder, format: Int, w: Int, h: Int) {}
 
           override fun surfaceDestroyed(holder: SurfaceHolder) {
-            surface = null
+            surfaceReady = false
           }
         })
 
@@ -76,7 +72,6 @@ class RemoteControlViewerActivity : Activity(), libtappervpn.RemoteControlViewer
 
   override fun onDestroy() {
     app.stopRemoteControl()
-    releaseDecoder()
     super.onDestroy()
   }
 
@@ -85,22 +80,22 @@ class RemoteControlViewerActivity : Activity(), libtappervpn.RemoteControlViewer
   override fun start(codec: String, width: Int, height: Int, hostKind: String) {
     hostW = width
     hostH = height
-    started = true
-    maybeStartDecoder()
   }
 
   override fun frame(frame: ByteArray) {
-    val dec = decoder ?: return
+    if (!surfaceReady) return
+    val holder = surfaceView.holder
+    val surface = holder.surface
+    if (surface == null || !surface.isValid) return
+    val bmp = BitmapFactory.decodeByteArray(frame, 0, frame.size) ?: return
+    val canvas = holder.lockCanvas() ?: run { bmp.recycle(); return }
     try {
-      val inIndex = dec.dequeueInputBuffer(10_000)
-      if (inIndex >= 0) {
-        val buf: ByteBuffer = dec.getInputBuffer(inIndex) ?: return
-        buf.clear()
-        buf.put(frame)
-        dec.queueInputBuffer(inIndex, 0, frame.size, System.nanoTime() / 1000, 0)
-      }
-    } catch (e: IllegalStateException) {
-      TSLog.e(TAG, "decoder input: ${e.message}")
+      canvas.drawBitmap(bmp, null, Rect(0, 0, canvas.width, canvas.height), null)
+    } catch (e: Exception) {
+      TSLog.e(TAG, "draw: ${e.message}")
+    } finally {
+      holder.unlockCanvasAndPost(canvas)
+      bmp.recycle()
     }
   }
 
@@ -113,68 +108,27 @@ class RemoteControlViewerActivity : Activity(), libtappervpn.RemoteControlViewer
     runOnUiThread { finish() }
   }
 
-  @Synchronized
-  private fun maybeStartDecoder() {
-    if (decoder != null || !started) return
-    val s = surface ?: return
-    if (hostW <= 0 || hostH <= 0) return
-    try {
-      val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, hostW, hostH)
-      val dec = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-      dec.configure(format, s, null, 0)
-      dec.start()
-      decoder = dec
-      thread(name = "rc-decoder") { drainDecoder(dec) }
-    } catch (e: Exception) {
-      TSLog.e(TAG, "decoder start failed: ${e.message}")
-    }
-  }
-
-  private fun drainDecoder(dec: MediaCodec) {
-    val info = MediaCodec.BufferInfo()
-    while (decoder === dec) {
-      try {
-        val outIndex = dec.dequeueOutputBuffer(info, 10_000)
-        if (outIndex >= 0) {
-          dec.releaseOutputBuffer(outIndex, true) // render to surface
-        }
-      } catch (e: IllegalStateException) {
-        break
-      }
-    }
-  }
-
-  private fun releaseDecoder() {
-    val dec = decoder
-    decoder = null
-    runCatching {
-      dec?.stop()
-      dec?.release()
-    }
-  }
-
   // --- input forwarding ---
 
   override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-    if (forwardKey(keyCode, event, down = true)) return true
+    if (forwardKey(keyCode, event)) return true
     return super.onKeyDown(keyCode, event)
   }
 
   override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
     val nav = keyCodeToNav(keyCode)
     if (nav != 0) {
-      // Fire a nav action on key-up (one discrete action per press).
       app.sendRemoteControlInput(RC.NAV, 0, 0, nav, true, 0, "")
       return true
     }
     return super.onKeyUp(keyCode, event)
   }
 
-  private fun forwardKey(keyCode: Int, event: KeyEvent?, down: Boolean): Boolean {
+  private fun forwardKey(keyCode: Int, event: KeyEvent?): Boolean {
     if (keyCodeToNav(keyCode) != 0) return true // handled on key-up
     val ch = event?.unicodeChar ?: 0
     if (ch != 0) {
-      app.sendRemoteControlInput(RC.TEXT, 0, 0, 0, down, 0, ch.toChar().toString())
+      app.sendRemoteControlInput(RC.TEXT, 0, 0, 0, true, 0, ch.toChar().toString())
       return true
     }
     return false

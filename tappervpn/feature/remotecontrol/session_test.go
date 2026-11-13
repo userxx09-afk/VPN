@@ -25,7 +25,7 @@ type fakeAgent struct {
 func newFakeAgent() *fakeAgent { return &fakeAgent{frames: make(chan []byte, 8)} }
 
 func (a *fakeAgent) Kind() string       { return "test" }
-func (a *fakeAgent) Codecs() []Codec    { return []Codec{CodecJPEGTiles} }
+func (a *fakeAgent) Codecs() []Codec    { return []Codec{CodecMJPEG} }
 func (a *fakeAgent) Screen() ScreenSize { return ScreenSize{1280, 720} }
 func (a *fakeAgent) RequestConsent(ctx context.Context, req ConsentRequest) ConsentDecision {
 	return ConsentDecision{Allow: true}
@@ -105,7 +105,7 @@ func TestSessionEndToEnd(t *testing.T) {
 		return viewer.accepted != nil
 	})
 	viewer.mu.Lock()
-	if viewer.accepted.Screen != (ScreenSize{1280, 720}) || viewer.accepted.Codec != CodecJPEGTiles {
+	if viewer.accepted.Screen != (ScreenSize{1280, 720}) || viewer.accepted.Codec != CodecMJPEG {
 		t.Errorf("bad accept: %+v", viewer.accepted)
 	}
 	viewer.mu.Unlock()
@@ -157,10 +157,10 @@ func TestSessionEndToEnd(t *testing.T) {
 
 // TestChooseCodec covers negotiation.
 func TestChooseCodec(t *testing.T) {
-	if c, ok := chooseCodec([]Codec{CodecH264, CodecJPEGTiles}, []Codec{CodecJPEGTiles}); !ok || c != CodecJPEGTiles {
-		t.Errorf("got %q ok=%v, want jpeg-tiles", c, ok)
+	if c, ok := chooseCodec([]Codec{CodecH264, CodecMJPEG}, []Codec{CodecMJPEG}); !ok || c != CodecMJPEG {
+		t.Errorf("got %q ok=%v, want mjpeg", c, ok)
 	}
-	if _, ok := chooseCodec([]Codec{CodecH264}, []Codec{CodecJPEGTiles}); ok {
+	if _, ok := chooseCodec([]Codec{CodecH264}, []Codec{CodecMJPEG}); ok {
 		t.Error("expected no common codec")
 	}
 }

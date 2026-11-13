@@ -74,10 +74,10 @@ type windowsHost struct {
 	controlledBy atomic.Value // string
 }
 
-func newHostPlatform() (HostPlatform, error) { return &windowsHost{}, nil }
+func newHostPlatform() (Platform, error) { return &windowsHost{}, nil }
 
 func (h *windowsHost) Kind() string       { return "windows" }
-func (h *windowsHost) Codecs() []rc.Codec { return []rc.Codec{rc.CodecJPEGTiles} }
+func (h *windowsHost) Codecs() []rc.Codec { return []rc.Codec{rc.CodecMJPEG} }
 
 func (h *windowsHost) Screen() rc.ScreenSize {
 	w, _, _ := procGetSystemMetrics.Call(uintptr(smCXScreen))

@@ -43,7 +43,7 @@ func main() {
 	}
 }
 
-func connectAndServe(ctx context.Context, p HostPlatform) error {
+func connectAndServe(ctx context.Context, p Platform) error {
 	pr, pw := io.Pipe()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, agentURL, pr)
 	if err != nil {

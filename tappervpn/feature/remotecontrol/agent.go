@@ -9,9 +9,18 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 
 	"tappervpn.com/types/logger"
 )
+
+// currentHelper is the attached user-session helper, if any, so the controller
+// side (serveConnect) can ask it to start controlling a peer. There is at most
+// one helper per machine.
+var currentHelper atomic.Pointer[helperHostAgent]
+
+// attachedHelper returns the currently attached helper, or nil.
+func attachedHelper() *helperHostAgent { return currentHelper.Load() }
 
 // On Windows (and any platform where the capturing/injecting code must run in a
 // user session separate from the tappervpnd service), the daemon itself cannot
@@ -149,6 +158,14 @@ func (a *helperHostAgent) SessionEnded(req ConsentRequest) {
 	a.send(AgentMessage{T: "session-end"})
 }
 
+// StartControlling asks the helper to open a controller session to the named
+// peer (it will dial back via the remotecontrol/dial endpoint and run the
+// session with its own viewer window). Used on Windows, where the controller
+// viewer lives in the helper rather than the daemon.
+func (a *helperHostAgent) StartControlling(peerID, peerName string) error {
+	return a.send(AgentMessage{T: "control-start", PeerID: peerID, PeerName: peerName})
+}
+
 func (a *helperHostAgent) send(m AgentMessage) error {
 	b, err := json.Marshal(m)
 	if err != nil {
@@ -241,6 +258,8 @@ func ServeAgentLink(rw io.ReadWriter, logf logger.Logf) error {
 
 	RegisterHostAgent(a)
 	defer RegisterHostAgent(nil)
+	currentHelper.Store(a)
+	defer currentHelper.CompareAndSwap(a, nil)
 	logf("remotecontrol: helper attached (kind=%s, %dx%d)", a.Kind(), a.screen.Width, a.screen.Height)
 
 	return a.readLoop()

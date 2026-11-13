@@ -61,7 +61,7 @@ func TestFrameTooLarge(t *testing.T) {
 func TestControlRoundTrip(t *testing.T) {
 	in := ControlMessage{
 		Type:   CtAccept,
-		Accept: &Accept{Version: ProtocolVersion, Codec: CodecJPEGTiles, Screen: ScreenSize{1920, 1080}, HostKind: "windows"},
+		Accept: &Accept{Version: ProtocolVersion, Codec: CodecMJPEG, Screen: ScreenSize{1920, 1080}, HostKind: "windows"},
 	}
 	b, err := encodeControl(in)
 	if err != nil {
@@ -74,7 +74,7 @@ func TestControlRoundTrip(t *testing.T) {
 	if out.Type != CtAccept || out.Accept == nil {
 		t.Fatalf("decoded = %+v", out)
 	}
-	if out.Accept.Codec != CodecJPEGTiles || out.Accept.Screen.Width != 1920 || out.Accept.Screen.Height != 1080 {
+	if out.Accept.Codec != CodecMJPEG || out.Accept.Screen.Width != 1920 || out.Accept.Screen.Height != 1080 {
 		t.Errorf("accept mismatch: %+v", out.Accept)
 	}
 }

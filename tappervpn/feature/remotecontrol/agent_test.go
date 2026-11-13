@@ -27,7 +27,7 @@ func TestAgentProxy(t *testing.T) {
 	helper := newFrameConn(helperConn)
 
 	// Helper announces itself.
-	sendAgent(t, helper, AgentMessage{T: "info", Kind: "windows", Codecs: []string{"jpeg-tiles"}, Width: 1920, Height: 1080})
+	sendAgent(t, helper, AgentMessage{T: "info", Kind: "windows", Codecs: []string{"mjpeg"}, Width: 1920, Height: 1080})
 
 	// Wait for the proxy to register and absorb the info.
 	waitFor(t, "host agent registered", func() bool {
@@ -65,7 +65,7 @@ func TestAgentProxy(t *testing.T) {
 	}
 	capCh := make(chan capRes, 1)
 	go func() {
-		f, e := agent.StartCapture(ctx, CodecJPEGTiles)
+		f, e := agent.StartCapture(ctx, CodecMJPEG)
 		capCh <- capRes{f, e}
 	}()
 	if m := recvAgent(t, helper); m.T != "capture-start" {

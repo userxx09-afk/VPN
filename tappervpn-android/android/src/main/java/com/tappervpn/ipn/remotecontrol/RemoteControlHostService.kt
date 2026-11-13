@@ -9,38 +9,41 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
+import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
-import android.media.MediaCodec
-import android.media.MediaCodecInfo
-import android.media.MediaFormat
+import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
+import android.os.Handler
+import android.os.HandlerThread
 import android.os.IBinder
 import android.util.DisplayMetrics
-import android.view.Surface
 import android.view.WindowManager
 import com.tappervpn.ipn.R
 import com.tappervpn.ipn.util.TSLog
-import java.nio.ByteBuffer
+import java.io.ByteArrayOutputStream
 
 /**
- * Foreground service that captures the screen with MediaProjection, encodes it
- * to H.264 with the hardware MediaCodec encoder, and pushes each encoded frame
- * (Annex-B, codec config first) to the Go core via RemoteControlManager. It runs
- * only between an accepted session's StartCapture and StopCapture.
+ * Foreground service that captures the screen with MediaProjection and emits a
+ * JPEG per frame (the universal MJPEG codec) to the Go core via
+ * RemoteControlManager. It runs only between an accepted session's StartCapture
+ * and StopCapture.
+ *
+ * MJPEG keeps the codec path dependency-free and interoperable with the Windows
+ * host/controller, at the cost of more bandwidth than H.264; frames are
+ * throttled and the long edge is capped to stay light.
  */
 class RemoteControlHostService : Service() {
   private val TAG = "RemoteControlHost"
 
   private var projection: MediaProjection? = null
   private var virtualDisplay: VirtualDisplay? = null
-  private var encoder: MediaCodec? = null
-  private var inputSurface: Surface? = null
-  @Volatile private var running = false
-  private var encoderThread: Thread? = null
+  private var imageReader: ImageReader? = null
+  private var captureThread: HandlerThread? = null
+  @Volatile private var lastFrameMs = 0L
 
   override fun onBind(intent: Intent?): IBinder? = null
 
@@ -82,29 +85,15 @@ class RemoteControlHostService : Service() {
     projection = proj
 
     val (width, height, dpi) = displayInfo()
-    // Cap the long edge to keep the stream light on bandwidth and CPU.
     val (encW, encH) = scaleToMax(width, height, 1280)
 
-    val format =
-        MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, encW, encH).apply {
-          setInteger(
-              MediaFormat.KEY_COLOR_FORMAT,
-              MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-          setInteger(MediaFormat.KEY_BIT_RATE, 4_000_000)
-          setInteger(MediaFormat.KEY_FRAME_RATE, 30)
-          setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
-          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            setInteger(
-                MediaFormat.KEY_BITRATE_MODE,
-                MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
-          }
-        }
+    val thread = HandlerThread("rc-capture").also { it.start() }
+    captureThread = thread
+    val handler = Handler(thread.looper)
 
-    val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-    codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-    inputSurface = codec.createInputSurface()
-    codec.start()
-    encoder = codec
+    val reader = ImageReader.newInstance(encW, encH, PixelFormat.RGBA_8888, 2)
+    imageReader = reader
+    reader.setOnImageAvailableListener({ r -> onImage(r) }, handler)
 
     virtualDisplay =
         proj.createVirtualDisplay(
@@ -113,51 +102,57 @@ class RemoteControlHostService : Service() {
             encH,
             dpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            inputSurface,
+            reader.surface,
             null,
-            null)
-
-    running = true
-    encoderThread = Thread({ drainEncoder() }, "rc-encoder").also { it.start() }
+            handler,
+        )
     TSLog.d(TAG, "capture started ${encW}x${encH}")
   }
 
-  private fun drainEncoder() {
-    val codec = encoder ?: return
-    val bufInfo = MediaCodec.BufferInfo()
-    while (running) {
-      val outIndex = codec.dequeueOutputBuffer(bufInfo, 10_000)
-      if (outIndex < 0) continue
-      val buf: ByteBuffer? = codec.getOutputBuffer(outIndex)
-      if (buf != null && bufInfo.size > 0) {
-        buf.position(bufInfo.offset)
-        buf.limit(bufInfo.offset + bufInfo.size)
-        val bytes = ByteArray(bufInfo.size)
-        buf.get(bytes)
-        // Codec config (SPS/PPS) and every frame are Annex-B; the controller's
-        // decoder is fed the same bytes verbatim.
-        RemoteControlManager.pushFrame(bytes)
-      }
-      codec.releaseOutputBuffer(outIndex, false)
-      if (bufInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) break
+  private fun onImage(reader: ImageReader) {
+    val image = reader.acquireLatestImage() ?: return
+    try {
+      // Throttle to keep bandwidth/CPU modest (~12 fps).
+      val now = System.currentTimeMillis()
+      if (now - lastFrameMs < 80) return
+      lastFrameMs = now
+
+      val plane = image.planes[0]
+      val width = image.width
+      val height = image.height
+      val rowStride = plane.rowStride
+      val pixelStride = plane.pixelStride
+      val rowPadding = rowStride - pixelStride * width
+
+      val bmp =
+          Bitmap.createBitmap(
+              width + rowPadding / pixelStride, height, Bitmap.Config.ARGB_8888)
+      bmp.copyPixelsFromBuffer(plane.buffer)
+      val cropped =
+          if (rowPadding == 0) bmp else Bitmap.createBitmap(bmp, 0, 0, width, height)
+
+      val out = ByteArrayOutputStream()
+      cropped.compress(Bitmap.CompressFormat.JPEG, 50, out)
+      RemoteControlManager.pushFrame(out.toByteArray())
+
+      if (cropped !== bmp) cropped.recycle()
+      bmp.recycle()
+    } catch (e: Exception) {
+      TSLog.e(TAG, "frame encode: ${e.message}")
+    } finally {
+      image.close()
     }
   }
 
   private fun stopEverything() {
-    running = false
-    encoderThread?.join(500)
-    encoderThread = null
     runCatching { virtualDisplay?.release() }
     virtualDisplay = null
-    runCatching {
-      encoder?.stop()
-      encoder?.release()
-    }
-    encoder = null
-    runCatching { inputSurface?.release() }
-    inputSurface = null
+    runCatching { imageReader?.close() }
+    imageReader = null
     runCatching { projection?.stop() }
     projection = null
+    runCatching { captureThread?.quitSafely() }
+    captureThread = null
   }
 
   override fun onDestroy() {
@@ -179,7 +174,7 @@ class RemoteControlHostService : Service() {
             .setOngoing(true)
             .build()
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-      startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+      startForeground(NOTIF_ID, n, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
     } else {
       startForeground(NOTIF_ID, n)
     }
@@ -199,7 +194,6 @@ class RemoteControlHostService : Service() {
     return evenPair((w * scale).toInt(), (h * scale).toInt())
   }
 
-  // H.264 requires even dimensions.
   private fun evenPair(w: Int, h: Int) = Pair(w and 1.inv(), h and 1.inv())
 
   companion object {
@@ -232,7 +226,6 @@ class RemoteControlHostService : Service() {
               .putExtra(EXTRA_PEER, peer))
     }
 
-    /** Keeps the EXTRA_DATA key name in one place for IntentCompat. */
     const val PROJECTION_DATA_KEY = EXTRA_DATA
   }
 }

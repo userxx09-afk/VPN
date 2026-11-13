@@ -82,9 +82,9 @@ object RemoteControlManager : libtappervpn.RemoteControlHost {
 
   override fun kind(): String = if (AndroidTVUtil.isAndroidTV()) "firetv" else "android"
 
-  // We capture with the hardware H.264 encoder (MediaCodec); advertise only
-  // what we actually produce.
-  override fun codecs(): String = "h264"
+  // MJPEG (one JPEG per frame) is the universal baseline every platform can
+  // encode and decode; see feature/remotecontrol/protocol.go.
+  override fun codecs(): String = "mjpeg"
 
   override fun screenWidth(): Int = screenSize().first
 

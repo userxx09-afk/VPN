@@ -310,6 +310,7 @@ change in the future.
 			configureHostCmd(),
 			systrayCmd,
 			appcRoutesCmd,
+			remoteControlCmd,
 			waitCmd,
 		),
 		FlagSet: rootfs,

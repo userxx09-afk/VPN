@@ -24,6 +24,7 @@ func init() {
 	localapi.Register("remotecontrol/targets", serveTargets)
 	localapi.Register("remotecontrol/connect", serveConnect)
 	localapi.Register("remotecontrol/agent", serveAgent)
+	localapi.Register("remotecontrol/dial", serveDial)
 }
 
 // Extension is the per-LocalBackend remote-control extension. It holds no

@@ -247,7 +247,7 @@ func chooseCodec(hostCodecs, controllerCodecs []Codec) (Codec, bool) {
 // viewerCodecs is the controller's advertised decode capability. Every platform
 // can decode JPEG tiles; H.264 is offered first where a decoder is wired in via
 // the viewer (the viewer maker may override this in a future revision).
-func viewerCodecs() []Codec { return []Codec{CodecH264, CodecJPEGTiles} }
+func viewerCodecs() []Codec { return []Codec{CodecMJPEG} }
 
 // consentTimeout bounds how long a host waits for the user to answer a prompt
 // before auto-denying, so a request cannot pin resources indefinitely.
