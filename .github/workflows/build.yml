@@ -1,0 +1,113 @@
+name: build
+
+# Build-and-verify CI: compiles the Go binaries (Linux + Windows, including the
+# remote-control daemon, CLI and user-session helper) and the Android/Fire TV
+# APK, and runs the Go tests. It signs nothing and publishes no release; rolling
+# an update out to devices is still done with scripts/release.ps1.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  go:
+    name: Go build & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tappervpn/go.mod
+          cache-dependency-path: tappervpn/go.sum
+
+      - name: Vet & test remote control
+        working-directory: tappervpn
+        run: |
+          go vet ./feature/remotecontrol/...
+          go test ./feature/remotecontrol/...
+
+      - name: Build client (Linux)
+        working-directory: tappervpn
+        run: go build ./cmd/tappervpnd ./cmd/tappervpn
+
+      - name: Build client (Windows, incl. remote-control helper)
+        working-directory: tappervpn
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: "0"
+        run: go build ./cmd/tappervpnd ./cmd/tappervpn ./cmd/tappervpn-remote
+
+      - name: Build control server (Linux)
+        working-directory: headscale
+        run: go build ./cmd/headscale
+
+  android:
+    name: Android / Fire TV APK
+    runs-on: ubuntu-latest
+    env:
+      GO_VERSION: "1.27.2"
+      NDK_VERSION: "23.1.7779620"
+      ANDROID_API: "36"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install SDK packages (platform, build-tools, NDK)
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install "platforms;android-${ANDROID_API}" "build-tools;${ANDROID_API}.0.0" "ndk;${NDK_VERSION}"
+
+      - name: Set up patched Go (Fire OS time32 fix)
+        run: |
+          # Android needs a Go with patches/go-android-time32.patch applied, so
+          # Fire OS 7 / Android 9 seccomp doesn't SIGSYS on futex_time64.
+          mkdir -p "$HOME/goandroid"
+          curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tgz
+          tar -C "$HOME/goandroid" -xzf /tmp/go.tgz
+          ( cd "$HOME/goandroid/go" && patch -p1 < "$GITHUB_WORKSPACE/patches/go-android-time32.patch" )
+          grep -q "meshwall patch" "$HOME/goandroid/go/src/runtime/os_linux32.go"
+
+      - name: Build AAR and APK
+        working-directory: tappervpn-android
+        run: |
+          export GOROOT="$HOME/goandroid/go"
+          export GOTOOLCHAIN=local
+          export GOBIN="$HOME/gobin"
+          export PATH="$GOROOT/bin:$GOBIN:$PATH"   # gomobile runs gobind from PATH
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/${NDK_VERSION}"
+          go version
+
+          # gomobile / gobind at the versions pinned in this module's go.mod.
+          go install golang.org/x/mobile/cmd/gomobile golang.org/x/mobile/cmd/gobind
+
+          # Version stamp read by Gradle (../tappervpn.version is gitignored).
+          hash="$(git rev-parse HEAD)"
+          engine="$(tr -d '[:space:]' < ../tappervpn/VERSION.txt)"
+          TS_VERSION_LONG="${engine}-t${hash:0:9}" TS_VERSION_GIT_HASH="$hash" \
+            go run tappervpn.com/cmd/mkversion > tappervpn.version
+          cat tappervpn.version
+
+          mkdir -p android/libs
+          gomobile bind -target android -androidapi 26 \
+            -tags not_tappervpn_go \
+            -ldflags "-linkmode=external -extldflags=-Wl,-z,max-page-size=16384" \
+            -o android/libs/libtappervpn.aar ./libtappervpn
+
+          cd android
+          ./gradlew --no-daemon -PcontrolURL=https://vp.tapper.co assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: tappervpn-debug-apk
+          path: tappervpn-android/android/build/outputs/apk/debug/android-debug.apk
+          if-no-files-found: error
