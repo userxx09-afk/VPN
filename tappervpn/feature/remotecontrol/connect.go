@@ -7,9 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"strings"
 
 	"tappervpn.com/ipn/ipnlocal"
 	"tappervpn.com/tailcfg"
@@ -58,39 +56,17 @@ func ConnectWithViewer(ctx context.Context, b *ipnlocal.LocalBackend, stableID s
 		return fmt.Errorf("peer %q is not reachable over PeerAPI", stableID)
 	}
 
-	// Stream the request body via a pipe so we can write frames to the host
-	// while concurrently reading its response.
-	pr, pw := io.Pipe()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/remotecontrol/v0/connect", pr)
-	if err != nil {
-		pw.Close()
-		viewer.Close()
-		return err
-	}
-	req.ContentLength = -1 // chunked: unbounded duplex stream
-
+	// Upgrade to a raw bidirectional connection. The host prompts for consent
+	// before switching protocols, so a decline arrives as a 403 (not a 101).
 	client := &http.Client{Transport: b.Dialer().PeerAPITransport()}
-	resp, err := client.Do(req)
+	conn, err := dialUpgradeHTTP(ctx, client, base+"/remotecontrol/v0/connect")
 	if err != nil {
-		pw.Close()
 		viewer.Close()
-		return fmt.Errorf("dialing %q: %w", peerDisplayName(peer), err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		resp.Body.Close()
-		pw.Close()
-		viewer.Close()
-		if resp.StatusCode == http.StatusForbidden {
+		var se *httpStatusError
+		if errors.As(err, &se) && se.code == http.StatusForbidden {
 			return fmt.Errorf("%s declined the connection", peerDisplayName(peer))
 		}
-		return fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(msg)))
-	}
-
-	conn := rwPair{
-		Reader: resp.Body,
-		Writer: pw,
-		closer: func() error { pw.Close(); return resp.Body.Close() },
+		return fmt.Errorf("dialing %q: %w", peerDisplayName(peer), err)
 	}
 	defer conn.Close()
 	// RunControllerSession closes the viewer on return.

@@ -50,20 +50,16 @@ func handleConnect(h ipnlocal.PeerAPIHandler, w http.ResponseWriter, r *http.Req
 		}
 	}
 
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+	// Accept: upgrade to a raw bidirectional connection and run the session.
+	// (A streaming HTTP body can't carry the duplex link; see upgrade.go.)
+	conn, err := hijackUpgrade(w, r)
+	if err != nil {
+		h.Logf("remotecontrol: upgrade failed for %q: %v", req.PeerName, err)
 		return
 	}
-
-	// Accept: open the stream, then run the session over the request body
-	// (controller→host) and the flushed response body (host→controller).
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.WriteHeader(http.StatusOK)
-	flusher.Flush()
+	defer conn.Close()
 
 	h.Logf("remotecontrol: accepted control session from %q", req.PeerName)
-	conn := rwPair{Reader: r.Body, Writer: flushWriter{w: w, f: flusher}}
 	if err := RunHostSession(r.Context(), conn, agent, req, h.Logf); err != nil {
 		h.Logf("remotecontrol: host session with %q ended: %v", req.PeerName, err)
 	}

@@ -61,23 +61,25 @@ func (l *linkWriter) control(m rc.AgentMessage) error {
 	return l.frame(rc.ChControl, b)
 }
 
-// runHostHelper drives the helper's link to the daemon until it closes or ctx
-// ends: it serves host requests (consent/capture/input) and launches a
-// controller session when the daemon asks (control-start).
-func runHostHelper(ctx context.Context, link io.ReadWriter, p Platform, logf func(string, ...any)) error {
-	lw := &linkWriter{w: link}
-
-	// Announce capabilities first; the daemon waits for this before advertising
-	// the node as controllable.
+// sendInfo announces this host's capabilities to the daemon. It must be the
+// first frame on the link: the daemon blocks reading it before it advertises
+// this node as controllable. The caller sends it concurrently with opening the
+// link so the streamed request body starts flowing (see connectAndServe).
+func sendInfo(lw *linkWriter, p Platform) error {
 	codecs := make([]string, 0, len(p.Codecs()))
 	for _, c := range p.Codecs() {
 		codecs = append(codecs, string(c))
 	}
 	s := p.Screen()
-	if err := lw.control(rc.AgentMessage{T: "info", Kind: p.Kind(), Codecs: codecs, Width: s.Width, Height: s.Height}); err != nil {
-		return err
-	}
+	return lw.control(rc.AgentMessage{T: "info", Kind: p.Kind(), Codecs: codecs, Width: s.Width, Height: s.Height})
+}
 
+// runHostHelper drives the helper's link to the daemon until it closes or ctx
+// ends: it serves host requests (consent/capture/input) and launches a
+// controller session when the daemon asks (control-start). The info frame must
+// already have been sent via sendInfo; r is the read half of the link and lw
+// writes to its write half.
+func runHostHelper(ctx context.Context, r io.Reader, lw *linkWriter, p Platform, logf func(string, ...any)) error {
 	var captureCancel context.CancelFunc
 	stopCapture := func() {
 		if captureCancel != nil {
@@ -88,7 +90,7 @@ func runHostHelper(ctx context.Context, link io.ReadWriter, p Platform, logf fun
 	defer stopCapture()
 
 	for {
-		ch, payload, err := rc.ReadFrame(link)
+		ch, payload, err := rc.ReadFrame(r)
 		if err != nil {
 			return err
 		}

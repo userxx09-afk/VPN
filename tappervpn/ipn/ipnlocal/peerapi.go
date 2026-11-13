@@ -4,6 +4,7 @@
 package ipnlocal
 
 import (
+	"bufio"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -1070,6 +1071,16 @@ func (hrw *httpResponseWrapper) Write(b []byte) (int, error) {
 	n, err := hrw.ResponseWriter.Write(b)
 	hrw.contentLength += int64(n)
 	return n, err
+}
+
+// Hijack delegates to the underlying ResponseWriter so PeerAPI handlers can
+// upgrade a request to a raw bidirectional connection (e.g. remote control).
+func (hrw *httpResponseWrapper) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hj, ok := hrw.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("underlying ResponseWriter is not an http.Hijacker")
+	}
+	return hj.Hijack()
 }
 
 // requestBodyWrapper wraps an io.ReadCloser and stores

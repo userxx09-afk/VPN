@@ -5,21 +5,56 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"time"
 
 	"tappervpn.com/client/local"
+	"tappervpn.com/paths"
 )
+
+// dialUpgrade opens a raw bidirectional connection to a local daemon endpoint by
+// HTTP Upgrade. The remote-control links are full-duplex and Go's HTTP/1 client
+// can't stream a request body while reading the response, so the daemon answers
+// with 101 Switching Protocols and we use the hijacked stream directly.
+func dialUpgrade(ctx context.Context, url string) (io.ReadWriteCloser, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Upgrade", "ts-remotecontrol")
+	req.Header.Set("Connection", "upgrade")
+	lc := &local.Client{Socket: paths.DefaultTapperVPNdSocket()}
+	resp, err := lc.DoLocalRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		resp.Body.Close()
+		return nil, fmt.Errorf("daemon returned %s: %s", resp.Status, strings.TrimSpace(string(b)))
+	}
+	rwc, ok := resp.Body.(io.ReadWriteCloser)
+	if !ok {
+		resp.Body.Close()
+		return nil, errors.New("daemon did not upgrade to a writable stream")
+	}
+	return rwc, nil
+}
 
 const agentURL = "http://local-tappervpnd.sock/localapi/v0/remotecontrol/agent"
 
 func main() {
 	log.SetPrefix("tappervpn-remote: ")
 	log.SetFlags(0)
+
+	log.Printf("starting; daemon socket=%s", paths.DefaultTapperVPNdSocket())
 
 	platform, err := newHostPlatform()
 	if err != nil {
@@ -33,7 +68,7 @@ func main() {
 	// drops. The daemon only advertises this node as controllable while a
 	// helper is attached.
 	for ctx.Err() == nil {
-		if err := connectAndServe(ctx, platform); err != nil && ctx.Err() == nil {
+		if err := connectAndServe(ctx, platform, log.Printf); err != nil && ctx.Err() == nil {
 			log.Printf("link ended: %v; reconnecting", err)
 		}
 		select {
@@ -43,40 +78,23 @@ func main() {
 	}
 }
 
-func connectAndServe(ctx context.Context, p Platform) error {
-	pr, pw := io.Pipe()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, agentURL, pr)
+func connectAndServe(ctx context.Context, p Platform, logf func(string, ...any)) error {
+	// Upgrade the agent link to a raw bidirectional connection. A streaming
+	// request body can't carry a duplex link over Go's HTTP/1 client, so the
+	// daemon answers with 101 and we use the raw stream (see dialUpgrade).
+	conn, err := dialUpgrade(ctx, agentURL)
 	if err != nil {
-		pw.Close()
 		return err
 	}
-	req.ContentLength = -1 // streamed, full-duplex
+	defer conn.Close()
+	logf("attached to daemon; serving link")
 
-	lc := &local.Client{}
-	resp, err := lc.DoLocalRequest(req)
-	if err != nil {
-		pw.Close()
+	lw := &linkWriter{w: conn}
+	if err := sendInfo(lw, p); err != nil {
 		return err
 	}
-	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
-		pw.Close()
-		return &statusError{resp.StatusCode}
-	}
-
-	link := &readWriter{r: resp.Body, w: pw}
-	defer resp.Body.Close()
-	defer pw.Close()
-	return runHostHelper(ctx, link, p, log.Printf)
+	return runHostHelper(ctx, conn, lw, p, logf)
 }
-
-type readWriter struct {
-	r io.Reader
-	w io.Writer
-}
-
-func (rw *readWriter) Read(p []byte) (int, error)  { return rw.r.Read(p) }
-func (rw *readWriter) Write(p []byte) (int, error) { return rw.w.Write(p) }
 
 type statusError struct{ code int }
 

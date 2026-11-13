@@ -5,11 +5,8 @@ package main
 
 import (
 	"context"
-	"io"
-	"net/http"
 	"net/url"
 
-	"tappervpn.com/client/local"
 	rc "tappervpn.com/feature/remotecontrol"
 )
 
@@ -39,36 +36,18 @@ func startControlling(ctx context.Context, peerID, peerName string, p Controller
 		return
 	}
 
-	pr, pw := io.Pipe()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, dialURL+"?id="+url.QueryEscape(peerID), pr)
+	// Upgrade to a raw bidirectional connection; the daemon relays it to the
+	// peer (whose user must accept first) and splices the two streams.
+	conn, err := dialUpgrade(ctx, dialURL+"?id="+url.QueryEscape(peerID))
 	if err != nil {
 		viewer.Close()
-		pw.Close()
-		logf("controller: request: %v", err)
+		logf("controller: %s declined or unreachable: %v", peerName, err)
 		return
 	}
-	req.ContentLength = -1
+	defer conn.Close()
 
-	resp, err := (&local.Client{}).DoLocalRequest(req)
-	if err != nil {
-		viewer.Close()
-		pw.Close()
-		logf("controller: dial: %v", err)
-		return
-	}
-	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
-		viewer.Close()
-		pw.Close()
-		logf("controller: %s declined or unreachable (HTTP %d)", peerName, resp.StatusCode)
-		return
-	}
-
-	conn := &readWriter{r: resp.Body, w: pw}
 	// RunControllerSession closes the viewer when it returns.
 	if err := rc.RunControllerSession(ctx, conn, viewer, logf); err != nil {
 		logf("controller: session with %s ended: %v", peerName, err)
 	}
-	resp.Body.Close()
-	pw.Close()
 }

@@ -5,6 +5,7 @@ package remotecontrol
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 
@@ -105,11 +106,6 @@ func serveDial(h *localapi.Handler, w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "remotecontrol extension not available", http.StatusInternalServerError)
 		return
 	}
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming not supported", http.StatusInternalServerError)
-		return
-	}
 	nb := ext.nodeBackend()
 	peer, ok := nb.PeerByStableID(tailcfg.StableNodeID(id))
 	if !ok {
@@ -122,36 +118,34 @@ func serveDial(h *localapi.Handler, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pr, pw := io.Pipe()
-	preq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, base+"/remotecontrol/v0/connect", pr)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	preq.ContentLength = -1
+	// Dial the peer first (this blocks during the remote user's consent), so a
+	// decline is reported to the helper as a normal HTTP error before we upgrade
+	// our own connection to the helper.
 	client := &http.Client{Transport: b.Dialer().PeerAPITransport()}
-	presp, err := client.Do(preq) // blocks during the remote user's consent
+	peerConn, err := dialUpgradeHTTP(r.Context(), client, base+"/remotecontrol/v0/connect")
 	if err != nil {
-		pw.Close()
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		var se *httpStatusError
+		if errors.As(err, &se) {
+			http.Error(w, "peer declined", se.code)
+		} else {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+		}
 		return
 	}
-	defer presp.Body.Close()
-	if presp.StatusCode != http.StatusOK {
-		pw.Close()
-		http.Error(w, "peer declined", presp.StatusCode)
-		return
-	}
+	defer peerConn.Close()
 
-	// Accepted: open our response and splice helper <-> peer.
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.WriteHeader(http.StatusOK)
-	flusher.Flush()
-	go func() {
-		io.Copy(pw, r.Body) // helper -> peer
-		pw.Close()
-	}()
-	io.Copy(flushWriter{w: w, f: flusher}, presp.Body) // peer -> helper
+	// Accepted: upgrade our link to the helper and splice helper <-> peer raw.
+	helperConn, err := hijackUpgrade(w, r)
+	if err != nil {
+		ext.logf("remotecontrol: dial upgrade to helper failed: %v", err)
+		return
+	}
+	defer helperConn.Close()
+
+	errc := make(chan error, 2)
+	go func() { _, err := io.Copy(peerConn, helperConn); errc <- err }() // helper -> peer
+	go func() { _, err := io.Copy(helperConn, peerConn); errc <- err }() // peer -> helper
+	<-errc
 }
 
 // serveAgent attaches a user-session helper to the daemon for the duration of
@@ -164,21 +158,18 @@ func serveAgent(h *localapi.Handler, w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "access denied", http.StatusForbidden)
 		return
 	}
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming not supported", http.StatusInternalServerError)
-		return
-	}
 	ext, ok := ipnlocal.GetExt[*Extension](h.LocalBackend())
 	if !ok {
 		http.Error(w, "remotecontrol extension not available", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.WriteHeader(http.StatusOK)
-	flusher.Flush()
+	conn, err := hijackUpgrade(w, r)
+	if err != nil {
+		ext.logf("remotecontrol: agent upgrade failed: %v", err)
+		return
+	}
+	defer conn.Close()
 
-	conn := rwPair{Reader: r.Body, Writer: flushWriter{w: w, f: flusher}}
 	if err := ServeAgentLink(conn, ext.logf); err != nil {
 		ext.logf("remotecontrol: helper link ended: %v", err)
 	}
