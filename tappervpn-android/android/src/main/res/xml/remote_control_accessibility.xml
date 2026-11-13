@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Copyright (c) Tailscale Inc & AUTHORS / SPDX-License-Identifier: BSD-3-Clause -->
+<!-- Lets RemoteControlAccessibilityService inject taps, swipes, text and global
+     actions (HOME/BACK/RECENTS) on behalf of a consented remote controller.
+     canPerformGestures enables dispatchGesture; no window content is read for
+     any purpose other than delivering the controller's input. -->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault"
+    android:canPerformGestures="true"
+    android:canRetrieveWindowContent="true"
+    android:description="@string/remote_control_a11y_description"
+    android:notificationTimeout="100" />

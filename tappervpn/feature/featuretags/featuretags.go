@@ -290,6 +290,10 @@ var Features = map[FeatureTag]FeatureMeta{
 		Desc: "Full remote configuration of this node by the tailnet admin, opting out of TapperVPN's per-feature double opt-in in favor of a single client-side trust decision",
 		Deps: []FeatureTag{"c2n"},
 	},
+	"remotecontrol": {
+		Sym:  "RemoteControl",
+		Desc: "Remote control (screen view + input) of this node by a consenting peer over the mesh",
+	},
 	"resolved": {
 		Sym:  "Resolved",
 		Desc: "Linux systemd-resolved integration",

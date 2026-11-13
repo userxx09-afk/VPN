@@ -22,6 +22,9 @@
     <!-- Auto-update: install new versions downloaded from GitHub (AppUpdater.kt). -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
+    <!-- Remote control: capture this screen for a consenting peer (remotecontrol/). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+
     <!-- Disable input emulation on ChromeOS -->
     <uses-feature
         android:name="android.hardware.type.pc"
@@ -151,6 +154,37 @@
             <meta-data
                 android:name="android.service.quicksettings.TOGGLEABLE_TILE"
                 android:value="true" />
+        </service>
+
+        <!-- Remote control (remotecontrol/): consent prompt, screen-capture
+             service, controller viewer, and the input AccessibilityService. -->
+        <activity
+            android:name=".remotecontrol.RemoteControlConsentActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTask"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
+            android:theme="@style/Theme.MaterialComponents.DayNight.NoActionBar" />
+        <activity
+            android:name=".remotecontrol.RemoteControlViewerActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
+            android:theme="@style/Theme.MaterialComponents.DayNight.NoActionBar" />
+        <service
+            android:name=".remotecontrol.RemoteControlHostService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+        <service
+            android:name=".remotecontrol.RemoteControlAccessibilityService"
+            android:exported="false"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/remote_control_accessibility" />
         </service>
 
         <meta-data

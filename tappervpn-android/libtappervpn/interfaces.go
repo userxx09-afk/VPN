@@ -150,6 +150,24 @@ type Application interface {
 	// on every new ipn.Notify message. The returned NotificationManager
 	// allows the watcher to stop watching notifications.
 	WatchNotifications(mask int, cb NotificationCallback) NotificationManager
+
+	// Remote control (screen view + input) over the mesh. See remotecontrol.go.
+
+	// SetRemoteControlHost installs the host-side implementation, making this
+	// device controllable subject to per-session consent.
+	SetRemoteControlHost(h RemoteControlHost)
+	// PushRemoteControlFrame delivers one encoded video frame from the capturer
+	// to the active host session.
+	PushRemoteControlFrame(frame []byte)
+	// ConnectRemoteControl asks the peer with the given StableNodeID to accept
+	// a control session and drives the viewer until it ends; it blocks and must
+	// be called off the main thread.
+	ConnectRemoteControl(stableID string, v RemoteControlViewer) error
+	// SendRemoteControlInput forwards a user input event to the active
+	// controller session.
+	SendRemoteControlInput(kind, x, y, button int, down bool, code int, text string)
+	// StopRemoteControl ends any active session on this device.
+	StopRemoteControl()
 }
 
 // FileParts is an array of multiple FileParts.

@@ -267,6 +267,7 @@ class App : UninitializedApp(), libtappervpn.AppContext, ViewModelStoreOwner {
     Request.setApp(app)
     Notifier.setApp(app)
     Notifier.start(applicationScope)
+    com.tappervpn.ipn.remotecontrol.RemoteControlManager.init(this, app)
   }
 
   private fun initViewModels() {
