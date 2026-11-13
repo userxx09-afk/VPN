@@ -36,12 +36,13 @@ type RemoteControlHost interface {
 	// best first (e.g. "h264,jpeg-tiles").
 	Codecs() string
 	// ScreenWidth and ScreenHeight return the current screen size in pixels.
-	ScreenWidth() int
-	ScreenHeight() int
+	// (int32, not int, so gomobile maps it to Kotlin Int rather than Long.)
+	ScreenWidth() int32
+	ScreenHeight() int32
 	// RequestConsent shows the "Allow <peerName> to control this device?"
 	// prompt and blocks until the user decides or timeoutSeconds elapses.
 	// It returns true to allow.
-	RequestConsent(peerName string, peerID string, timeoutSeconds int) bool
+	RequestConsent(peerName string, peerID string, timeoutSeconds int32) bool
 	// StartCapture begins producing encoded frames in the named codec; the
 	// Kotlin side delivers each frame by calling App.PushRemoteControlFrame.
 	StartCapture(codec string) error
@@ -49,7 +50,7 @@ type RemoteControlHost interface {
 	StopCapture()
 	// InjectInput applies one input event to the device. kind/button/code are
 	// the numeric values from the feature's input protocol.
-	InjectInput(kind int, x int, y int, button int, down bool, code int, text string)
+	InjectInput(kind int32, x int32, y int32, button int32, down bool, code int32, text string)
 	// SessionStarted/SessionEnded bracket a live session so Kotlin can show and
 	// hide the "being controlled by <peerName>" notification and kill switch.
 	SessionStarted(peerName string)
@@ -59,9 +60,9 @@ type RemoteControlHost interface {
 // RemoteControlViewer is implemented in Kotlin for the controller side. It
 // renders frames the host sends and is told the negotiated format on Start.
 type RemoteControlViewer interface {
-	Start(codec string, width int, height int, hostKind string) error
+	Start(codec string, width int32, height int32, hostKind string) error
 	Frame(frame []byte)
-	Resize(width int, height int)
+	Resize(width int32, height int32)
 	Close()
 }
 
@@ -143,7 +144,7 @@ func (app *App) ConnectRemoteControl(stableID string, v RemoteControlViewer) err
 
 // SendRemoteControlInput forwards a user input event from the Kotlin viewer to
 // the active controller session.
-func (app *App) SendRemoteControlInput(kind, x, y, button int, down bool, code int, text string) {
+func (app *App) SendRemoteControlInput(kind, x, y, button int32, down bool, code int32, text string) {
 	rc.mu.Lock()
 	ch := rc.viewerInput
 	rc.mu.Unlock()
@@ -152,8 +153,8 @@ func (app *App) SendRemoteControlInput(kind, x, y, button int, down bool, code i
 	}
 	e := remotecontrol.InputEvent{
 		Kind:   remotecontrol.InputKind(kind),
-		X:      int32(x),
-		Y:      int32(y),
+		X:      x,
+		Y:      y,
 		Button: uint8(button),
 		Down:   down,
 		Code:   uint32(code),
@@ -197,7 +198,7 @@ func (h *rcHostAgent) Codecs() []remotecontrol.Codec {
 }
 
 func (h *rcHostAgent) Screen() remotecontrol.ScreenSize {
-	return remotecontrol.ScreenSize{Width: h.cb.ScreenWidth(), Height: h.cb.ScreenHeight()}
+	return remotecontrol.ScreenSize{Width: int(h.cb.ScreenWidth()), Height: int(h.cb.ScreenHeight())}
 }
 
 func (h *rcHostAgent) RequestConsent(ctx context.Context, req remotecontrol.ConsentRequest) remotecontrol.ConsentDecision {
@@ -238,7 +239,7 @@ func (h *rcHostAgent) StartCapture(ctx context.Context, codec remotecontrol.Code
 }
 
 func (h *rcHostAgent) InjectInput(e remotecontrol.InputEvent) {
-	h.cb.InjectInput(int(e.Kind), int(e.X), int(e.Y), int(e.Button), e.Down, int(e.Code), e.Text)
+	h.cb.InjectInput(int32(e.Kind), e.X, e.Y, int32(e.Button), e.Down, int32(e.Code), e.Text)
 }
 
 func (h *rcHostAgent) SessionStarted(req remotecontrol.ConsentRequest, stop func()) {
@@ -262,9 +263,9 @@ type rcViewer struct {
 }
 
 func (v *rcViewer) Start(a remotecontrol.Accept) error {
-	return v.cb.Start(string(a.Codec), a.Screen.Width, a.Screen.Height, a.HostKind)
+	return v.cb.Start(string(a.Codec), int32(a.Screen.Width), int32(a.Screen.Height), a.HostKind)
 }
-func (v *rcViewer) Frame(payload []byte)             { v.cb.Frame(payload) }
-func (v *rcViewer) Resize(s remotecontrol.ScreenSize) { v.cb.Resize(s.Width, s.Height) }
+func (v *rcViewer) Frame(payload []byte)                   { v.cb.Frame(payload) }
+func (v *rcViewer) Resize(s remotecontrol.ScreenSize)      { v.cb.Resize(int32(s.Width), int32(s.Height)) }
 func (v *rcViewer) Input() <-chan remotecontrol.InputEvent { return v.input }
-func (v *rcViewer) Close()                           { v.cb.Close() }
+func (v *rcViewer) Close()                                 { v.cb.Close() }

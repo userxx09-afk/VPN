@@ -165,7 +165,7 @@ type Application interface {
 	ConnectRemoteControl(stableID string, v RemoteControlViewer) error
 	// SendRemoteControlInput forwards a user input event to the active
 	// controller session.
-	SendRemoteControlInput(kind, x, y, button int, down bool, code int, text string)
+	SendRemoteControlInput(kind, x, y, button int32, down bool, code int32, text string)
 	// StopRemoteControl ends any active session on this device.
 	StopRemoteControl()
 }
