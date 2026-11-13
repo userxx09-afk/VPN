@@ -90,7 +90,7 @@ func TestInputRoundTrip(t *testing.T) {
 		{Kind: InputPointerMove, X: -5, Y: -5}, // negative deltas must survive
 	}
 	for i, in := range cases {
-		out, err := decodeInput(encodeInput(in))
+		out, err := DecodeInput(EncodeInput(in))
 		if err != nil {
 			t.Fatalf("#%d decode: %v", i, err)
 		}
@@ -101,7 +101,7 @@ func TestInputRoundTrip(t *testing.T) {
 }
 
 func TestInputShort(t *testing.T) {
-	if _, err := decodeInput([]byte{1, 2, 3}); err == nil {
+	if _, err := DecodeInput([]byte{1, 2, 3}); err == nil {
 		t.Fatal("expected error on short input event")
 	}
 }

@@ -18,12 +18,15 @@ $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 if (-not $admin) { throw "Run this from an Administrator PowerShell." }
 
 $task = "TapperVPN Update"
-$files = "tappervpn.exe", "tappervpnd.exe", "tappervpn-updater.exe", "wintun.dll"
+$helperTask = "TapperVPN Remote Helper"
+$files = "tappervpn.exe", "tappervpnd.exe", "tappervpn-updater.exe", "tappervpn-remote.exe", "wintun.dll"
 
 if ($Uninstall) {
     Unregister-ScheduledTask -TaskName $task -Confirm:$false -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask -TaskName $helperTask -Confirm:$false -ErrorAction SilentlyContinue
+    Stop-Process -Name tappervpn-remote -Force -ErrorAction SilentlyContinue
     if (Test-Path "$Dest\tappervpnd.exe") { & "$Dest\tappervpnd.exe" uninstall-system-daemon }
-    Write-Host "Removed the service and update task. Files are still in $Dest."
+    Write-Host "Removed the service, update task, and remote helper. Files are still in $Dest."
     return
 }
 
@@ -35,6 +38,7 @@ foreach ($f in $files) {
 # Stop a running copy before replacing its files.
 $svc = Get-Service TapperVPN -ErrorAction SilentlyContinue
 if ($svc) { Stop-Service TapperVPN -Force }
+Stop-Process -Name tappervpn-remote -Force -ErrorAction SilentlyContinue
 
 New-Item -ItemType Directory -Force $Dest | Out-Null
 foreach ($f in $files) { Copy-Item (Join-Path $From $f) $Dest -Force }
@@ -58,4 +62,17 @@ Register-ScheduledTask -TaskName $task -Action $action -Trigger $daily, $boot -S
     -User "SYSTEM" -RunLevel Highest -Force | Out-Null
 
 & "$Dest\tappervpn-updater.exe" -check
+
+# Remote-control helper: runs in the interactive user session (the session-0
+# service can't capture the screen or inject input), launched at each logon for
+# any user. It attaches to the daemon and only acts after on-screen consent.
+$helperAction = New-ScheduledTaskAction -Execute "$Dest\tappervpn-remote.exe"
+$helperTrigger = New-ScheduledTaskTrigger -AtLogOn
+$helperPrincipal = New-ScheduledTaskPrincipal -GroupId "S-1-5-32-545" -RunLevel Limited # Users
+$helperSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Seconds 0)
+Register-ScheduledTask -TaskName $helperTask -Action $helperAction -Trigger $helperTrigger `
+    -Principal $helperPrincipal -Settings $helperSettings -Force | Out-Null
+
 Write-Host "TapperVPN is installed in $Dest and updates itself daily (task '$task')."
+Write-Host "The remote-control helper (task '$helperTask') starts at logon; it asks for consent before any session."

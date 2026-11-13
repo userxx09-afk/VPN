@@ -124,7 +124,7 @@ func hostReadLoop(fc *frameConn, agent HostAgent, logf logger.Logf) error {
 		}
 		switch ch {
 		case ChInput:
-			e, err := decodeInput(payload)
+			e, err := DecodeInput(payload)
 			if err != nil {
 				logf("remotecontrol: bad input event: %v", err)
 				continue
@@ -189,7 +189,7 @@ func RunControllerSession(ctx context.Context, rw io.ReadWriter, viewer Viewer, 
 					cancel() // viewer closed
 					return
 				}
-				if err := fc.write(ChInput, encodeInput(e)); err != nil {
+				if err := fc.write(ChInput, EncodeInput(e)); err != nil {
 					logf("remotecontrol: input write: %v", err)
 					cancel()
 					return

@@ -23,6 +23,7 @@ func init() {
 	ipnlocal.RegisterPeerAPIHandler("/remotecontrol/v0/connect", handleConnect)
 	localapi.Register("remotecontrol/targets", serveTargets)
 	localapi.Register("remotecontrol/connect", serveConnect)
+	localapi.Register("remotecontrol/agent", serveAgent)
 }
 
 // Extension is the per-LocalBackend remote-control extension. It holds no

@@ -226,7 +226,7 @@ const (
 )
 
 // InputEvent is a single input action sent from controller to host. It encodes
-// to a compact fixed-layout binary form (encodeInput); Text events append the
+// to a compact fixed-layout binary form (EncodeInput); Text events append the
 // UTF-8 bytes after the fixed header.
 type InputEvent struct {
 	Kind   InputKind
@@ -240,7 +240,7 @@ type InputEvent struct {
 // fixed input header: kind(1) x(4) y(4) button(1) down(1) code(4) textLen(4)
 const inputHeaderLen = 1 + 4 + 4 + 1 + 1 + 4 + 4
 
-func encodeInput(e InputEvent) []byte {
+func EncodeInput(e InputEvent) []byte {
 	text := []byte(e.Text)
 	buf := make([]byte, inputHeaderLen+len(text))
 	buf[0] = byte(e.Kind)
@@ -256,7 +256,7 @@ func encodeInput(e InputEvent) []byte {
 	return buf
 }
 
-func decodeInput(b []byte) (InputEvent, error) {
+func DecodeInput(b []byte) (InputEvent, error) {
 	if len(b) < inputHeaderLen {
 		return InputEvent{}, fmt.Errorf("remotecontrol: short input event (%d bytes)", len(b))
 	}

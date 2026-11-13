@@ -425,4 +425,6 @@
     <string name="copy_ipv4_address">Copy IPv4</string>
     <string name="copy_ipv6_address">Copy IPv6</string>
     <string name="remote_control_a11y_description">Lets a device you approve on your TapperVPN network control this device (taps, swipes, text, and Home/Back) while a remote-control session is active. Raw D-pad keys into other apps are not available without this.</string>
+    <string name="remote_control_device">Control this device</string>
+    <string name="remote_control_device_desc">View its screen and control it (it must accept)</string>
 </resources>

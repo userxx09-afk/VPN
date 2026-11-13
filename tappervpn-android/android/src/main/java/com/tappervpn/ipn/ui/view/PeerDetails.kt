@@ -35,6 +35,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.tappervpn.ipn.R
+import com.tappervpn.ipn.remotecontrol.RemoteControlManager
 import com.tappervpn.ipn.ui.theme.listItem
 import com.tappervpn.ipn.ui.theme.short
 import com.tappervpn.ipn.ui.util.AndroidTVUtil.isAndroidTV
@@ -117,6 +118,12 @@ fun PeerDetails(
         LazyColumn(
             modifier = Modifier.padding(innerPadding),
         ) {
+          item(key = "remoteControl") {
+            ControlDeviceRow(stableID = node.StableID.toString())
+          }
+
+          item(key = "remoteControlDivider") { Lists.SectionDivider() }
+
           item(key = "tappervpnAddresses") {
             Lists.MutedHeader(stringResource(R.string.tappervpn_addresses))
           }
@@ -164,6 +171,18 @@ fun AddressRow(address: String, type: String) {
           Icon(painter = painterResource(id = R.drawable.clipboard), null)
         }
       },
+  )
+}
+
+@Composable
+fun ControlDeviceRow(stableID: String) {
+  val context = LocalContext.current
+  ListItem(
+      modifier = Modifier.clickable { RemoteControlManager.controlPeer(context, stableID) },
+      colors = MaterialTheme.colorScheme.listItem,
+      headlineContent = { Text(text = stringResource(R.string.remote_control_device)) },
+      supportingContent = { Text(text = stringResource(R.string.remote_control_device_desc)) },
+      trailingContent = { Icon(painter = painterResource(R.drawable.sensors_24), null) },
   )
 }
 

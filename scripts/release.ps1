@@ -52,7 +52,9 @@ function GoBuild($dir, $goos, $outFile, $pkg) {
 Write-Host "== TapperVPN $version"
 
 # --- Windows: tappervpn-windows-amd64.zip ---
-foreach ($cmd in "tappervpn", "tappervpnd", "tappervpn-updater") {
+# tappervpn-remote is the user-session helper for remote control (screen + input);
+# it runs in the interactive session that the session-0 service cannot reach.
+foreach ($cmd in "tappervpn", "tappervpnd", "tappervpn-updater", "tappervpn-remote") {
     GoBuild "$root\tappervpn" "windows" "$stage\windows\$cmd.exe" "./cmd/$cmd"
 }
 # wintun.dll: WireGuard LLC's signed tunnel driver, redistributable unmodified.

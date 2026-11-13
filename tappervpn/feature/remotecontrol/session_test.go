@@ -24,8 +24,8 @@ type fakeAgent struct {
 
 func newFakeAgent() *fakeAgent { return &fakeAgent{frames: make(chan []byte, 8)} }
 
-func (a *fakeAgent) Kind() string      { return "test" }
-func (a *fakeAgent) Codecs() []Codec   { return []Codec{CodecJPEGTiles} }
+func (a *fakeAgent) Kind() string       { return "test" }
+func (a *fakeAgent) Codecs() []Codec    { return []Codec{CodecJPEGTiles} }
 func (a *fakeAgent) Screen() ScreenSize { return ScreenSize{1280, 720} }
 func (a *fakeAgent) RequestConsent(ctx context.Context, req ConsentRequest) ConsentDecision {
 	return ConsentDecision{Allow: true}

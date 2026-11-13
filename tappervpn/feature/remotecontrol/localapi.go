@@ -58,3 +58,33 @@ func serveConnect(h *localapi.Handler, w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// serveAgent attaches a user-session helper to the daemon for the duration of
+// the request. Over this full-duplex stream the daemon proxies host-side work
+// (consent, capture, input) to the helper; see agent.go. The helper is a local,
+// trusted process, so this requires write permission like the other endpoints.
+// POST /localapi/v0/remotecontrol/agent.
+func serveAgent(h *localapi.Handler, w http.ResponseWriter, r *http.Request) {
+	if !h.PermitWrite {
+		http.Error(w, "access denied", http.StatusForbidden)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+	ext, ok := ipnlocal.GetExt[*Extension](h.LocalBackend())
+	if !ok {
+		http.Error(w, "remotecontrol extension not available", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	conn := rwPair{Reader: r.Body, Writer: flushWriter{w: w, f: flusher}}
+	if err := ServeAgentLink(conn, ext.logf); err != nil {
+		ext.logf("remotecontrol: helper link ended: %v", err)
+	}
+}
