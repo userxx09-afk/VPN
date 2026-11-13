@@ -60,6 +60,10 @@ jobs:
           java-version: "17"
 
       - uses: android-actions/setup-android@v3
+        with:
+          # Don't let the action install the obsolete "tools" package (it no
+          # longer exists and fails the step); we install what we need below.
+          packages: platform-tools
 
       - name: Install SDK packages (platform, build-tools, NDK)
         run: |
