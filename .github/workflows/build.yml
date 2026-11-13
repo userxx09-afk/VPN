@@ -38,7 +38,22 @@ jobs:
           GOOS: windows
           GOARCH: amd64
           CGO_ENABLED: "0"
-        run: go build ./cmd/tappervpnd ./cmd/tappervpn ./cmd/tappervpn-remote
+        run: |
+          # Unsigned, for manual download + testing only (no auto-update). The
+          # GUI app needs -H windowsgui so it has no console window.
+          out="$RUNNER_TEMP/windows"
+          mkdir -p "$out"
+          for cmd in tappervpn tappervpnd tappervpn-updater tappervpn-remote; do
+            go build -trimpath -o "$out/$cmd.exe" ./cmd/$cmd
+          done
+          go build -trimpath -ldflags "-H windowsgui" -o "$out/tappervpn-gui.exe" ./cmd/tappervpn-gui
+
+      - name: Upload Windows binaries (unsigned, for testing)
+        uses: actions/upload-artifact@v4
+        with:
+          name: tappervpn-windows-unsigned
+          path: ${{ runner.temp }}/windows/*.exe
+          if-no-files-found: error
 
       - name: Build control server (Linux)
         working-directory: headscale
