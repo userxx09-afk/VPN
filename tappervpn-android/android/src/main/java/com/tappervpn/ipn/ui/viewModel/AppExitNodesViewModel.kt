@@ -48,6 +48,11 @@ class AppExitNodesViewModel : ViewModel() {
   /** The app whose exit node is being picked, or null when the picker is closed. */
   val pickingFor: StateFlow<InstalledApp?> = MutableStateFlow(null)
 
+  /** The assigned apps use more than one exit node, so usage access is needed. */
+  val needsUsageAccess: StateFlow<Boolean> = MutableStateFlow(false)
+
+  // Must come after every property above: Kotlin runs initializers top to bottom, and
+  // refreshUsageAccess() sets needsUsageAccess, which crashed the screen while it was declared below.
   init {
     AppExitNodes.get(App.get())
     refreshUsageAccess()
@@ -55,6 +60,18 @@ class AppExitNodesViewModel : ViewModel() {
 
   fun refreshUsageAccess() {
     hasUsageAccess.set(AppExitNodes.hasUsageAccess(App.get()))
+    needsUsageAccess.set(AppExitNodes.needsUsageAccess(App.get()))
+  }
+
+  /** Opens the settings screen for usage access. Returns false if the device has none (Fire TV). */
+  fun openUsageAccessSettings(): Boolean {
+    val intent = AppExitNodes.usageAccessIntent(App.get()) ?: return false
+    return try {
+      App.get().startActivity(intent)
+      true
+    } catch (e: Exception) {
+      false
+    }
   }
 
   fun pick(app: InstalledApp?) {
@@ -69,5 +86,9 @@ class AppExitNodesViewModel : ViewModel() {
         node?.let { AppExitNodes.Assignment(it.id, it.name) },
     )
     pickingFor.set(null)
+    val wasNeeded = needsUsageAccess.value
+    refreshUsageAccess()
+    // The first time apps need different exit nodes, take the user straight to the switch.
+    if (!wasNeeded && needsUsageAccess.value && !hasUsageAccess.value) openUsageAccessSettings()
   }
 }

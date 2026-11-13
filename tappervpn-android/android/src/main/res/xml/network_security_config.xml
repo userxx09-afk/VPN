@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- TapperVPN: the admin page on tapper is plain HTTP and only reachable over the VPN.
+     Allow cleartext to it alone, for crash reports (CrashReporter.kt). Everything else
+     keeps Android's defaults. -->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">100.64.0.2</domain>
+    </domain-config>
+</network-security-config>

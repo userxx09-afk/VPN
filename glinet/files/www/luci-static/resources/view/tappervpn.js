@@ -117,6 +117,25 @@ return view.extend({
 		o.datatype = 'port';
 		o.placeholder = '41642';
 
+		o = s.option(form.Flag, 'auto_update', _('Install updates automatically'),
+			_('Checks for a signed TapperVPN update once a night (4–5 AM).'));
+		o.default = '1';
+
+		o = s.option(form.Flag, 'remote_control', _('Allow the admin console to update this router'),
+			_('Checks in with the TapperVPN admin console every minute, so it lists this router and can start an update there.'));
+		o.default = '1';
+
+		o = s.option(form.Value, 'admin_url', _('Admin console'),
+			_('Reached over the VPN. The name is looked up through 1.1.1.1; if that fails, the address below is used.'));
+		o.placeholder = 'http://vpnadmin.tapper.co:8096';
+		o.depends('remote_control', '1');
+
+		o = s.option(form.Value, 'admin_ip', _('Admin console address (fallback)'),
+			_('The server\'s VPN address.'));
+		o.datatype = 'ip4addr';
+		o.placeholder = '100.64.0.2';
+		o.depends('remote_control', '1');
+
 		return m.render();
 	}
 });

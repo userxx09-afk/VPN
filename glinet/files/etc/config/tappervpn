@@ -32,3 +32,10 @@ config tappervpn 'main'
 	option port '41642'
 	# Check GitHub once a day and install signed TapperVPN updates.
 	option auto_update '1'
+	# Check in with the admin console every minute, so it lists this router and can
+	# start an update or a re-apply from there.
+	option remote_control '1'
+	# The admin console: a DNS-only record pointing at the server's VPN address
+	# (looked up through 1.1.1.1), and the address to use if that lookup fails.
+	option admin_url 'http://vpnadmin.tapper.co:8096'
+	option admin_ip '100.64.0.2'

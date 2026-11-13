@@ -115,6 +115,8 @@ class App : UninitializedApp(), libtappervpn.AppContext, ViewModelStoreOwner {
 
   override fun onCreate() {
     super.onCreate()
+    CrashReporter.install(this)
+    CrashReporter.sendPending(this)
     appInstance = this
     setUnprotectedInstance(this)
     mdmChangeReceiver = MDMSettingsChangedReceiver()
@@ -879,5 +881,26 @@ open class UninitializedApp : Application() {
           "com.comcast.modesto.vvm.client",
           // Android Connectivity Service https://github.com/tailscale/tailscale/issues/14128
           "com.google.android.apps.scone",
+          // Fire TV: Alexa and Amazon's always-on cloud link. Bringing the VPN up made them drop
+          // their connection to Amazon and the Alexa light flashed amber; keep them off the VPN.
+          // Packages that aren't installed are skipped.
+          "com.amazon.tcomm",
+          "com.amazon.tcomm.client",
+          "com.amazon.vizzini",
+          "com.amazon.vizzini.ftvcds",
+          "com.amazon.alexamediaplayer.runtime.ftv",
+          "com.amazon.alexa.externalmediaplayer.fireos",
+          "com.amazon.alexadirectivebrokerservice",
+          "com.amazon.alexa.datastore.app",
+          "amazon.speech.davs.davcservice",
+          "com.amazon.whad",
+          "com.amazon.tv.devicecontrol",
+          "com.amazon.tv.alexanotifications",
+          "com.amazon.tv.alexaalerts",
+          "com.amazon.device.messaging",
+          "com.amazon.device.sync",
+          "com.amazon.device.metrics",
+          "com.amazon.device.software.ota",
+          "com.amazon.device_remote_config_sync_service",
       )
 }

@@ -6,6 +6,9 @@ import android.app.AppOpsManager
 import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
 import android.os.Process
 import com.tappervpn.ipn.ui.localapi.Client
 import com.tappervpn.ipn.ui.model.Ipn
@@ -90,6 +93,44 @@ object AppExitNodes {
     return mode == AppOpsManager.MODE_ALLOWED
   }
 
+  /**
+   * Reports whether the assigned apps use more than one exit node. Only then does TapperVPN need to
+   * see which app is open (usage access); with one exit node it's simply turned on.
+   */
+  fun needsUsageAccess(context: Context): Boolean =
+      get(context).values.map { it.nodeId }.distinct().size > 1
+
+  /**
+   * The settings screen where the user turns on usage access for TapperVPN (on Android 10+ many
+   * devices open TapperVPN's own switch directly). Null if the device has no such screen (Fire TV).
+   */
+  fun usageAccessIntent(context: Context): Intent? {
+    val withPkg =
+        Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)
+            .setData(Uri.parse("package:" + context.packageName))
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    val plain = Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    val pm = context.packageManager
+    return listOf(withPkg, plain).firstOrNull { it.resolveActivity(pm) != null }
+  }
+
+  @Volatile private var lastSetAt = 0L
+
+  /** Switches the exit node to [a] unless it's already in use (at most every few seconds). */
+  private fun useExitNode(a: Assignment, why: String) {
+    val current = Notifier.prefs.value?.activeExitNodeID
+    if (current == a.nodeId) return
+    val now = System.currentTimeMillis()
+    if (now - lastSetAt < 5_000) return
+    lastSetAt = now
+    TSLog.d(TAG, "$why; switching exit node to ${a.nodeName}")
+    val prefsOut = Ipn.MaskedPrefs()
+    prefsOut.ExitNodeID = a.nodeId
+    Client(CoroutineScope(Dispatchers.IO)).editPrefs(prefsOut) { result ->
+      result.exceptionOrNull()?.let { TSLog.e(TAG, "switching exit node: $it") }
+    }
+  }
+
   /** Starts watching the foreground app; called while the VPN service runs. Idempotent. */
   @Synchronized
   fun startWatching(context: Context, scope: CoroutineScope) {
@@ -101,7 +142,12 @@ object AppExitNodes {
           var since = System.currentTimeMillis() - 10_000
           var warned = false
           while (isActive) {
-            if (get(appContext).isNotEmpty()) {
+            val assigned = get(appContext)
+            if (assigned.isNotEmpty() && !needsUsageAccess(appContext)) {
+              // Every assigned app uses the same exit node: just keep it on. Only assigned apps go
+              // through the VPN, so nothing else is affected, and no usage access is needed.
+              useExitNode(assigned.values.first(), "one exit node for all assigned apps")
+            } else if (assigned.isNotEmpty()) {
               if (!hasUsageAccess(appContext)) {
                 if (!warned) {
                   TSLog.w(TAG, "no usage access; per-app exit nodes can't follow the foreground app")
@@ -144,14 +190,8 @@ object AppExitNodes {
     // Unassigned apps bypass the VPN, so the exit node doesn't matter to them; leaving it alone
     // avoids needless switches when passing through the launcher.
     val assignment = get(context)[pkg] ?: return
-    val current = Notifier.prefs.value?.activeExitNodeID
-    if (current == assignment.nodeId) return
-    TSLog.d(TAG, "$pkg in foreground; switching exit node to ${assignment.nodeName}")
-    val prefsOut = Ipn.MaskedPrefs()
-    prefsOut.ExitNodeID = assignment.nodeId
-    Client(CoroutineScope(Dispatchers.IO)).editPrefs(prefsOut) { result ->
-      result.exceptionOrNull()?.let { TSLog.e(TAG, "switching exit node for $pkg: $it") }
-    }
+    lastSetAt = 0L // an app switch should take effect at once
+    useExitNode(assignment, "$pkg in foreground")
   }
 
   private fun encode(m: Map<String, Assignment>): String {

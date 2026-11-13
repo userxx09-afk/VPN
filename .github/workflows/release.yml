@@ -1,0 +1,269 @@
+# Builds, signs and publishes a TapperVPN release on GitHub, the same files
+# scripts\release.ps1 makes, then builds TapperVPN-Setup.exe for it. Every
+# device auto-updates from the release this publishes.
+#
+# Releases go to the public, releases-only repo userxx09-afk/prod (this source
+# repo is private): vpn-v<version>, plus the rolling vpn-latest that devices
+# check. That needs a third secret, PROD_REPO_TOKEN (fine-grained, Contents:
+# read and write on userxx09-afk/prod only). While this repo is still public,
+# each release is also published here so devices on older builds get the
+# update that moves them to prod; that stops once the repo is private.
+#
+# To release: change VERSION (e.g. 0.2.5) and push it to main. Or: Actions >
+# Release > Run workflow (releases whatever VERSION says on main).
+# A push that changes this workflow but not VERSION, or "dry run" ticked when
+# running it by hand, builds everything without signing or publishing.
+#
+# Needs two repository secrets (Settings > Secrets and variables > Actions),
+# added once from the PC that has the keys:
+#   TAPPERVPN_RELEASE_KEY   the contents of %USERPROFILE%\.tappervpn\release.key
+#   ANDROID_DEBUG_KEYSTORE  %USERPROFILE%\.android\debug.keystore, base64
+# Android only installs an update signed with the same key as the installed
+# app, and devices only install releases signed with the release key, so both
+# must be the originals, not new ones.
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths: [VERSION, .github/workflows/release.yml]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build everything but don't sign or publish (no secrets needed)
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      dry_run: ${{ steps.version.outputs.dry_run }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      OUT: ${{ github.workspace }}/bin/release/out
+      STAGE: ${{ github.workspace }}/bin/release/stage
+    steps:
+      # The Android build needs more disk than a runner has free (0.2.16 failed with
+      # "no space left on device"); drop big preinstalled toolchains this job never uses.
+      - name: Free disk space
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost \
+            /usr/share/swift /usr/local/share/powershell /opt/hostedtoolcache/CodeQL \
+            /usr/local/lib/node_modules /usr/local/julia* /opt/az /usr/share/miniconda || true
+          sudo docker image prune -af >/dev/null 2>&1 || true
+          df -h / | tail -1
+      - uses: actions/checkout@v4
+
+      - name: Version
+        id: version
+        env:
+          HAVE_RELEASE_KEY: ${{ secrets.TAPPERVPN_RELEASE_KEY != '' }}
+          HAVE_ANDROID_KEY: ${{ secrets.ANDROID_DEBUG_KEYSTORE != '' }}
+          HAVE_PROD_TOKEN: ${{ secrets.PROD_REPO_TOKEN != '' }}
+          DRY_INPUT: ${{ inputs.dry_run == true }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          # Dry run: ticked by hand, or a push that didn't change VERSION.
+          DRY_RUN=$DRY_INPUT
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            git fetch -q --depth=1 origin "$BEFORE" 2>/dev/null || true
+            rc=0; git diff --quiet "$BEFORE" "$GITHUB_SHA" -- VERSION 2>/dev/null || rc=$?
+            [ $rc = 1 ] && DRY_RUN=false || DRY_RUN=true
+          fi
+          echo "DRY_RUN=$DRY_RUN" >> "$GITHUB_ENV"
+          echo "dry_run=$DRY_RUN" >> "$GITHUB_OUTPUT"
+          echo "Dry run: $DRY_RUN"
+          v=$(tr -d '[:space:]' < VERSION)
+          [[ $v =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::VERSION must look like 1.2.3, got '$v'"; exit 1; }
+          if [ "$DRY_RUN" != true ] && gh release view "vpn-v$v" --repo userxx09-afk/prod >/dev/null 2>&1; then
+            echo "::error::Release vpn-v$v already exists in prod. Put a newer version in VERSION."
+            exit 1
+          fi
+          [ "$DRY_RUN" = true ] || [ "$HAVE_PROD_TOKEN" = true ] || { echo "::error::Add the PROD_REPO_TOKEN secret (see the top of this workflow)."; exit 1; }
+          [ "$DRY_RUN" = true ] || [ "$HAVE_RELEASE_KEY" = true ] || { echo "::error::Add the TAPPERVPN_RELEASE_KEY secret (see the top of this workflow)."; exit 1; }
+          [ "$DRY_RUN" = true ] || [ "$HAVE_ANDROID_KEY" = true ] || { echo "::error::Add the ANDROID_DEBUG_KEYSTORE secret (see the top of this workflow)."; exit 1; }
+          engine=$(tr -d '[:space:]' < tappervpn/VERSION.txt)
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+          echo "LDFLAGS=-s -w -X tappervpn.com/updater.Version=$v -X tappervpn.com/version.longStamp=$engine-t${GITHUB_SHA::9} -X tappervpn.com/version.shortStamp=$engine -X tappervpn.com/version.gitCommitStamp=$GITHUB_SHA" >> "$GITHUB_ENV"
+          echo "tag=vpn-v$v" >> "$GITHUB_OUTPUT"
+          mkdir -p "$OUT" "$STAGE/windows" "$STAGE/server"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tappervpn/go.mod
+          cache-dependency-path: |
+            tappervpn/go.sum
+            headscale/go.sum
+            tappervpn-android/go.sum
+
+      - name: Windows (tappervpn-windows-amd64.zip)
+        run: |
+          cd tappervpn
+          export GOOS=windows GOARCH=amd64 CGO_ENABLED=0
+          for cmd in tappervpn tappervpnd tappervpn-updater; do
+            go build -trimpath -ldflags "$LDFLAGS" -o "$STAGE/windows/$cmd.exe" ./cmd/$cmd
+          done
+          # The TapperVPN app (window + taskbar icon), a GUI exe.
+          go build -trimpath -ldflags "$LDFLAGS -H windowsgui" -o "$STAGE/windows/tappervpn-gui.exe" ./cmd/tappervpn-gui
+          # wintun.dll: WireGuard LLC's signed tunnel driver, pinned by hash.
+          curl -fsSL -o "$RUNNER_TEMP/wintun.zip" https://www.wintun.net/builds/wintun-0.14.1.zip
+          unzip -q -o "$RUNNER_TEMP/wintun.zip" -d "$RUNNER_TEMP/wintun"
+          cp "$RUNNER_TEMP/wintun/wintun/bin/amd64/wintun.dll" "$STAGE/windows/"
+          echo "e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce  $STAGE/windows/wintun.dll" | sha256sum -c
+          (cd "$STAGE/windows" && zip -q "$OUT/tappervpn-windows-amd64.zip" *)
+
+      - name: Server (tappervpn-server-linux-amd64.tar.gz)
+        run: |
+          export GOOS=linux GOARCH=amd64 CGO_ENABLED=0
+          (cd headscale && go build -trimpath -ldflags "$LDFLAGS" -o "$STAGE/server/headscale" ./cmd/headscale)
+          cd tappervpn
+          for cmd in tappervpn tappervpnd tappervpn-updater; do
+            go build -trimpath -ldflags "$LDFLAGS" -o "$STAGE/server/$cmd" ./cmd/$cmd
+          done
+          cp ../server/install.sh ../server/policy.hujson "$STAGE/server/"
+          tar -czf "$OUT/tappervpn-server-linux-amd64.tar.gz" -C "$STAGE/server" .
+
+      - name: Routers (tappervpn-glinet-<cpu>.ipk)
+        run: |
+          python3 glinet/build.py
+          for ipk in bin/glinet/tappervpn_${VERSION}-*_*.ipk; do
+            cpu=$(basename "$ipk" .ipk); cpu=${cpu##*_}
+            cp "$ipk" "$OUT/tappervpn-glinet-$cpu.ipk"
+          done
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Android (tappervpn-android.apk)
+        env:
+          ANDROID_DEBUG_KEYSTORE: ${{ secrets.ANDROID_DEBUG_KEYSTORE }}
+        run: |
+          # Same steps as scripts/build-android.ps1.
+          # On failure, repeat the error lines as annotations: those are public,
+          # the full log needs a GitHub sign-in.
+          LOG="$RUNNER_TEMP/android.log"
+          exec > >(tee "$LOG") 2>&1
+          trap 'rc=$?; if [ $rc -ne 0 ]; then sleep 1; grep -E "^e: |error:|What went wrong|FAILED|Exception" "$LOG" | grep -v "^::" | tail -20 | while IFS= read -r l; do echo "::error::$l"; done; fi' EXIT
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;23.1.7779620" "platforms;android-36" "build-tools;36.0.0" >/dev/null
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/23.1.7779620"
+          # Fire TV needs a Go with patches/go-android-time32.patch.
+          cp -r "$(go env GOROOT)" "$RUNNER_TEMP/go-android"
+          patch -p1 -d "$RUNNER_TEMP/go-android" < patches/go-android-time32.patch
+          grep -q "meshwall patch" "$RUNNER_TEMP/go-android/src/runtime/os_linux32.go"
+          export GOROOT="$RUNNER_TEMP/go-android" GOTOOLCHAIN=local
+          export PATH="$GOROOT/bin:$PATH"
+          # The key every installed app is signed with. Android only installs an
+          # update signed with the same key, so it's handed to Gradle explicitly:
+          # left to itself, Gradle on this runner makes a new throwaway key each
+          # build (that broke updates in 0.2.5-0.2.8). A dry run uses a throwaway.
+          KS="$RUNNER_TEMP/android-signing.keystore"
+          if [ "$DRY_RUN" != true ]; then
+            echo "$ANDROID_DEBUG_KEYSTORE" | base64 -d > "$KS"
+          else
+            keytool -genkeypair -keystore "$KS" -storepass android -keypass android -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 30 -dname "CN=dry run" >/dev/null 2>&1
+          fi
+          export ANDROID_USER_HOME="$RUNNER_TEMP/android-user-home"
+          mkdir -p "$ANDROID_USER_HOME" && cp "$KS" "$ANDROID_USER_HOME/debug.keystore"
+          SIGN="-Pandroid.injected.signing.store.file=$KS -Pandroid.injected.signing.store.password=android -Pandroid.injected.signing.key.alias=androiddebugkey -Pandroid.injected.signing.key.password=android"
+          WANT=$(keytool -list -v -keystore "$KS" -storepass android -alias androiddebugkey | sed -n 's/^.*SHA256: //p' | tr -d ':' | tr 'A-F' 'a-f')
+          cd tappervpn-android
+          engine=$(tr -d '[:space:]' < ../tappervpn/VERSION.txt)
+          TS_VERSION_LONG="$engine-t${GITHUB_SHA::9}" TS_VERSION_GIT_HASH="$GITHUB_SHA" \
+            go run tappervpn.com/cmd/mkversion > tappervpn.version
+          eval "$(grep "^VERSION_" tappervpn.version)"
+          export GOBIN="$PWD/android/build/go/bin" PATH="$PWD/android/build/go/bin:$PATH"
+          go install golang.org/x/mobile/cmd/gomobile golang.org/x/mobile/cmd/gobind
+          mkdir -p android/libs
+          gomobile bind -target android -androidapi 26 -tags not_tappervpn_go \
+            -ldflags "-linkmode=external -extldflags=-Wl,-z,max-page-size=16384 -X tappervpn.com/version.longStamp=$VERSION_LONG -X tappervpn.com/version.shortStamp=$VERSION_SHORT -X tappervpn.com/version.gitCommitStamp=$VERSION_GIT_HASH -X tappervpn.com/version.extraGitCommitStamp=$VERSION_EXTRA_HASH -X tappervpn.com/updater.Version=$VERSION" \
+            -o "$PWD/android/libs/libtappervpn.aar" ./libtappervpn
+          (cd android && bash ./gradlew --no-daemon -PcontrolURL=https://vp.tapper.co $SIGN assembleDebug)
+          APK=android/build/outputs/apk/debug/android-debug.apk
+          # Refuse to release an APK not signed with that key: phones couldn't update to it.
+          GOT=$("$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$APK" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
+          echo "APK signed with $GOT, want $WANT"
+          [ -n "$WANT" ] && [ "$GOT" = "$WANT" ] || { echo "::error::The APK isn't signed with the Android signing key (got $GOT, want $WANT)"; exit 1; }
+          cp "$APK" "$OUT/tappervpn-android.apk"
+          rm -f "$KS" "$ANDROID_USER_HOME/debug.keystore"
+
+      - name: Sign
+        if: env.DRY_RUN != 'true'
+        env:
+          RELEASE_KEY: ${{ secrets.TAPPERVPN_RELEASE_KEY }}
+        run: |
+          export TAPPERVPN_RELEASE_KEY="$RUNNER_TEMP/release.key"
+          printf '%s' "$RELEASE_KEY" > "$TAPPERVPN_RELEASE_KEY"
+          trap 'rm -f "$TAPPERVPN_RELEASE_KEY"' EXIT
+          cd tappervpn && go run ./cmd/tappervpn-release sign "$OUT"
+          ls -l "$OUT"
+
+      - name: Publish to prod
+        if: env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PROD_REPO_TOKEN }}
+          PROD: userxx09-afk/prod
+        run: |
+          # As drafts first, so no device sees a half-uploaded release.
+          tag=vpn-v$VERSION
+          gh release create "$tag" "$OUT"/* --repo "$PROD" \
+            --target main --title "TapperVPN $VERSION" --draft --notes "TapperVPN $VERSION, built from $GITHUB_REPOSITORY@$GITHUB_SHA."
+          gh release edit "$tag" --repo "$PROD" --draft=false --latest=false
+          # The rolling release devices check. Its title carries the version.
+          gh release delete vpn-latest --repo "$PROD" --yes --cleanup-tag 2>/dev/null || true
+          gh release create vpn-latest "$OUT"/* --repo "$PROD" \
+            --target main --title "TapperVPN $VERSION" --draft --notes "Always the newest TapperVPN. Every device updates from this release."
+          gh release edit vpn-latest --repo "$PROD" --draft=false --latest=false
+          echo "Published https://github.com/$PROD/releases/tag/$tag"
+
+      # The Tapper Dashboard reads this to tell which release each device's build is.
+      - name: Release map for the dashboard (releases.json)
+        if: env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PROD_REPO_TOKEN }}
+          PROD: userxx09-afk/prod
+        run: |
+          git fetch -q --unshallow origin || true
+          python3 scripts/make-releases.py "$RUNNER_TEMP/releases.json"
+          gh release upload vpn-latest "$RUNNER_TEMP/releases.json" --repo "$PROD" --clobber
+
+      # Transition only: devices on builds from before the move still check this
+      # repo's latest release. Skipped once the repo is private.
+      - name: Publish here too (while this repo is public)
+        if: env.DRY_RUN != 'true' && github.event.repository.private != true
+        run: |
+          tag=v$VERSION
+          gh release create "$tag" "$OUT"/* --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" --title "TapperVPN $VERSION" --draft --generate-notes
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+
+      - name: Keep the unsigned build (dry run)
+        if: env.DRY_RUN == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dry-run-${{ env.VERSION }}
+          path: bin/release/out/
+
+  # A release made with the workflow token doesn't start other workflows, so
+  # build the installer from here.
+  installer:
+    needs: build
+    if: needs.build.outputs.dry_run != 'true'
+    uses: ./.github/workflows/windows-installer.yml
+    secrets: inherit
+    with:
+      tag: ${{ needs.build.outputs.tag }}
+      attach: true

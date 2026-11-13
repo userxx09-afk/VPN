@@ -15,6 +15,7 @@ Everything needed to build and release TapperVPN is in this repo:
 | `glinet/` | Package for GL.iNet / OpenWrt routers | ours |
 | `server/` | Server config, policy, `install.sh` for the Ubuntu server | ours |
 | `scripts/` | Build, install, release and rebrand scripts | ours |
+| `installer/` | Windows installer (`TapperVPN-Setup.exe`, Inno Setup) | ours |
 | `docs/` | Design notes, [upstream updates](docs/upstream.md) | ours |
 
 The client and app are renamed forks of Tailscale: the Go module is
@@ -35,6 +36,10 @@ is `com.tappervpn.ipn`. "Tailscale" still appears in the copyright notices
 **Back up the two signing keys.** If the release key is lost, devices refuse
 new updates and must be reinstalled by hand. If the Android key is lost,
 the app must be uninstalled and reinstalled.
+
+Both keys were replaced on 2026-11-08 (release key `d739b42fa865f734`) after
+the originals were lost. Devices installed from 0.2.4 or older trust only the
+old key: reinstall them once from 0.2.5 or newer (Android: uninstall first).
 
 ## Prerequisites (Windows build PC)
 
@@ -59,13 +64,28 @@ cd ../headscale && go build -o ../bin/ ./cmd/headscale
 
 ## Releases and auto-update
 
-The version lives in `VERSION`. To release: bump it, commit, then run
-`scripts\release.ps1 -Publish` (with `$env:GITHUB_TOKEN` set). It builds every
-platform, writes `SHA256SUMS`, signs it with the release key, and publishes a
-GitHub release with these files:
+The version lives in `VERSION`. To release: put the new version in it and push
+to `main`. GitHub (`.github/workflows/release.yml`) then builds every platform,
+writes `SHA256SUMS`, signs it with the release key, publishes the release, and
+builds `TapperVPN-Setup.exe` for it. Actions > Release > Run workflow does the
+same for whatever `VERSION` says; tick "dry run" to build without signing or
+publishing. It uses two repository secrets, added once from the PC that has
+the keys (Settings > Secrets and variables > Actions):
+
+| Secret | Value (PowerShell, copies it to the clipboard) |
+|---|---|
+| `TAPPERVPN_RELEASE_KEY` | `Get-Content $env:USERPROFILE\.tappervpn\release.key -Raw \| Set-Clipboard` |
+| `ANDROID_DEBUG_KEYSTORE` | `[Convert]::ToBase64String([IO.File]::ReadAllBytes("$env:USERPROFILE\.android\debug.keystore")) \| Set-Clipboard` |
+
+Anyone who can push workflow changes to this repo can use these secrets, so
+keep write access to people you trust. `scripts\release.ps1 -Publish` (with
+`$env:GITHUB_TOKEN` set) still does the same from that PC.
+
+A release has these files:
 
 | File | Installed by |
 |---|---|
+| `TapperVPN-Setup.exe` | Windows: first install (added by GitHub after publishing, see below) |
 | `tappervpn-windows-amd64.zip` | Windows: `tappervpn-updater.exe`, daily scheduled task |
 | `tappervpn-server-linux-amd64.tar.gz` | Server: `tappervpn-updater`, daily systemd timer |
 | `tappervpn-glinet-<cpu>.ipk` | Routers: `/usr/libexec/tappervpn/update`, daily cron |
@@ -81,9 +101,24 @@ installed one.
 
 ## Installing
 
-- **Windows**: `scripts\install-windows.ps1` (Administrator) installs to
-  `C:\Program Files\TapperVPN`, adds the `TapperVPN` service and the
-  `TapperVPN Update` task. Then sign in once with `tappervpn up --login-server=... --auth-key=...`.
+- **Windows**: download and run
+  [TapperVPN-Setup.exe](https://github.com/userxx09-afk/prod/releases/download/vpn-latest/TapperVPN-Setup.exe).
+  It installs to `C:\Program Files\TapperVPN` (added to PATH), adds the
+  `TapperVPN` service and the `TapperVPN Update` task, and opens the
+  **TapperVPN app** (`tappervpn-gui.exe`, `tappervpn/cmd/tappervpn-gui`):
+  the Windows version of the Android app. It signs the PC in (server, and an
+  auth key or approval on the server), connects and disconnects, picks the
+  exit node, lists the devices with copyable VPN addresses, opens the admin
+  page, and checks for and installs updates. It lives in the taskbar's
+  notification area (started at every Windows sign-in; left click opens the
+  window, right click has quick controls) and in the Start menu.
+  Uninstall from Settings > Apps.
+  Silent: `TapperVPN-Setup.exe /VERYSILENT /AUTHKEY=<key>`.
+  The installer is built by `.github/workflows/windows-installer.yml` from
+  `installer/tappervpn.iss` whenever a release is published (it checks the
+  release's signature first). To add it to an older release: Actions >
+  Windows installer > Run workflow. For a dev build from `bin\`:
+  `scripts\install-windows.ps1` (Administrator).
 - **Server**: copy and unpack the server tarball on the server, then
   `sudo sh install.sh .`.
 - **Routers**: see [glinet/README.md](glinet/README.md).
@@ -120,7 +155,8 @@ installed one.
 
 ## Roadmap
 
-1. **Own UI**: Windows tray app for choosing the gateway and app list.
+1. **Own UI**: the Windows app (`cmd/tappervpn-gui`) does sign-in, connect,
+   exit node, per-app routing and devices.
 2. **macOS**: `NETransparentProxyProvider` system extension.
 3. **iOS**: full-tunnel or domain-based only. Per-app VPN needs MDM; iOS cannot be a gateway.
 4. **Logo in the web client**: its icons come from Tailscale's prebuilt web UI package; building our own web UI would let it use the TapperVPN logo too.

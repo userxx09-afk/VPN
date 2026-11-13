@@ -91,9 +91,9 @@ class Tailcfg {
           Capabilities?.contains("https://tailscale.com/cap/is-admin") == true ||
               CapMap?.contains("https://tailscale.com/cap/is-admin") == true
 
-    // Derives the url to directly administer a node
+    // The admin page has no per-device URL; it lists every device on one page.
     val nodeAdminUrl: String
-      get() = primaryIPv4Address?.let { "${Links.ADMIN_URL}/machines/${it}" } ?: Links.ADMIN_URL
+      get() = Links.ADMIN_URL
 
     val primaryIPv4Address: String?
       get() = displayAddresses.firstOrNull { it.type == DisplayAddress.addrType.V4 }?.address

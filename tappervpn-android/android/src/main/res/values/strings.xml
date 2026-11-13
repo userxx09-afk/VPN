@@ -51,7 +51,7 @@
 
     <!-- Strings for the settings screen -->
     <string name="settings_title">Settings</string>
-    <string name="settings_admin_prefix">"Manage your tailnet settings in the "</string>
+    <string name="settings_admin_prefix">"Manage your VPN settings in the "</string>
     <string name="settings_admin_link">admin console</string>
     <string name="about_tappervpn">About TapperVPN</string>
     <string name="bug_report">Bug report</string>
@@ -65,19 +65,19 @@
     <string name="exit_node_offline_mdm_orgname">The exit node selected by %1$s is currently offline. Internet traffic is blocked. Contact a network administrator for help.</string>
     <string name="exit_node_offline_mdm">The exit node selected by your organization is currently offline. Internet traffic is blocked. Contact a network administrator for help.</string>
     <string name="starting">Starting…</string>
-    <string name="connect_to_tailnet_prefix">"Connect again to talk to the other devices in the "</string>
-    <string name="connect_to_tailnet_suffix">" tailnet."</string>
+    <string name="connect_to_tailnet_prefix">"Connect again to talk to the other devices on "</string>
+    <string name="connect_to_tailnet_suffix">"."</string>
     <string name="welcome_to_tappervpn">Welcome to TapperVPN</string>
-    <string name="login_to_join_your_tailnet">Log in to join your tailnet and connect your devices.</string>
+    <string name="login_to_join_your_tailnet">Log in to join TapperVPN and connect your devices.</string>
     <string name="give_permissions">Set up a VPN connection so you can start using TapperVPN.</string>
     <string name="keyExpiryExplainer">Reauthenticate to remain connected to TapperVPN.</string>
     <string name="deviceKeyNeverExpires">Device key does not expire</string>
     <string name="deviceKeyExpires">Device key expires %s</string>
     <string name="deviceKeyExpired">Device key expired %s</string>
     <string name="key_expiry_notification_title">TapperVPN sign-in expires soon</string>
-    <string name="key_expiry_notification_body">Reauthenticate to keep this device connected to your tailnet.</string>
+    <string name="key_expiry_notification_body">Reauthenticate to keep this device connected to TapperVPN.</string>
     <string name="machine_auth_required">Admin approval required</string>
-    <string name="machine_auth_explainer">This device must be approved by an administrator before it can connect to the tailnet.</string>
+    <string name="machine_auth_explainer">This device must be approved by an administrator before it can connect to TapperVPN.</string>
     <string name="open_admin_console">Open admin console</string>
     <string name="needs_machine_auth">Authorization required</string>
     <string name="disable">Disable</string>
@@ -139,11 +139,11 @@
     <string name="invalidAuthKeyTitle">Invalid key</string>
     <string name="custom_control_url_title">Custom control server URL</string>
     <string name="auth_key_input_title">Auth key</string>
-    <string name="delete_tailnet">Delete tailnet</string>
+    <string name="delete_tailnet">Delete account</string>
     <string name="contact_support">Contact support</string>
     <string name="request_deletion_nonowner">All requests related to the removal or deletion of data are handled by our Support team. To open a request, tap the Contact Support button below to be taken to our contact form in the browser. Complete the form, and a Customer Support Engineer will work with you directly to assist.</string>
-    <string name="request_deletion_owner_part1">As the owner of this tailnet, to remove yourself from the tailnet you can either reassign ownership and contact our Support team, or delete the whole tailnet through the admin console. To do the latter, go to</string>
-    <string name="request_deletion_owner_part2a">and look for “Delete tailnet”.</string>
+    <string name="request_deletion_owner_part1">To remove this device or account, use the TapperVPN admin page. Go to</string>
+    <string name="request_deletion_owner_part2a">and remove the device there.</string>
 
     <string name="request_deletion_owner_part2b">All requests related to the removal or deletion of data are handled by our Support team. To open a request, tap the Contact Support button below to be taken to our contact form in the browser. Complete the form, and a Customer Support Engineer will work with you directly to assist.</string>
 
@@ -154,33 +154,33 @@
     <string name="best_available">Best available</string>
     <string name="run_as_exit_node">Run as exit node</string>
     <string name="run_this_device_as_an_exit_node">Run as exit node?</string>
-    <string name="run_exit_node_explainer">Other devices in your tailnet will be able to route their internet traffic through this Android device. Make sure to approve this exit node in the admin console in order for other devices to see it.</string>
+    <string name="run_exit_node_explainer">Other devices on TapperVPN will be able to route their internet traffic through this Android device. Make sure to approve this exit node on the admin page in order for other devices to see it.</string>
     <string name="run_exit_node_caution">Running an exit node will severely impact battery life. On a metered data plan, significant cellular data charges may also apply. Always disable this feature when no longer needed.</string>
     <string name="stop_running_as_exit_node">Stop running as exit node</string>
     <string name="start_running_as_exit_node">Run as exit node</string>
     <string name="running_as_exit_node">Now running as exit node</string>
-    <string name="run_exit_node_explainer_running">Other devices in your tailnet can now route their internet traffic through this Android device. Make sure to approve this exit node in the admin console in order for other devices to see it.</string>
+    <string name="run_exit_node_explainer_running">Other devices on TapperVPN can now route their internet traffic through this Android device. Make sure to approve this exit node on the admin page in order for other devices to see it.</string>
     <string name="enabled">Enabled</string>
     <string name="disabled">Disabled</string>
     <string name="exit_node_mdm_orgname">%1$s requires you to use an exit node.</string>
     <string name="exit_node_mdm">Your organization requires you to use an exit node.</string>
 
-    <!-- Strings for the tailnet lock screen -->
-    <string name="tailnet_lock">Tailnet lock</string>
-    <string name="tailnet_lock_explainer">"Tailnet lock lets devices in your network verify public keys distributed by the coordination server before trusting them for connectivity. "</string>
-    <string name="tailnet_lock_enabled">Tailnet lock is currently enabled.</string>
-    <string name="tailnet_lock_disabled">Tailnet lock is currently not enabled.</string>
+    <!-- Strings for the network lock screen -->
+    <string name="tailnet_lock">Network lock</string>
+    <string name="tailnet_lock_explainer">"Network lock lets devices in your network verify public keys distributed by the coordination server before trusting them for connectivity. "</string>
+    <string name="tailnet_lock_enabled">Network lock is currently enabled.</string>
+    <string name="tailnet_lock_disabled">Network lock is currently not enabled.</string>
     <string name="this_node_has_been_signed">This node has been signed by another device.</string>
     <string name="this_node_has_not_been_signed">This node has not been signed by another device.</string>
-    <string name="this_node_is_trusted">This node is trusted to change the Tailnet lock configuration.</string>
-    <string name="this_node_is_not_trusted">This node is not trusted to change the Tailnet lock configuration.</string>
+    <string name="this_node_is_trusted">This device is trusted to change the network lock configuration.</string>
+    <string name="this_node_is_not_trusted">This device is not trusted to change the network lock configuration.</string>
     <string name="copy_to_clipboard">Copy to clipboard</string>
     <string name="copy">Copy</string>
     <string name="copied">Copied</string>
     <string name="node_key">Node key</string>
-    <string name="tailnet_lock_key">Tailnet lock key</string>
-    <string name="node_key_explainer">Used to sign this node from another signing device in your tailnet.</string>
-    <string name="tailnet_lock_key_explainer">Used to authorize changes to the Tailnet lock configuration.</string>
+    <string name="tailnet_lock_key">Network lock key</string>
+    <string name="node_key_explainer">Used to sign this device from another signing device on TapperVPN.</string>
+    <string name="tailnet_lock_key_explainer">Used to authorize changes to the network lock configuration.</string>
 
     <!-- Strings for the bug report screen -->
     <string name="bug_report_id">Bug report ID</string>
@@ -211,8 +211,8 @@
     <string name="shows_a_button_to_open_support_resources_next_to_the_organization_name">Shows a button to open support resources next to the organization name.</string>
     <string name="shows_the_given_caption_next_to_the_organization_name_in_the_client">Shows the given caption next to the organization name in the client.</string>
     <string name="shows_the_given_organization_name_in_the_client">Shows the given organization name in the client.</string>
-    <string name="the_tailnet_policy_allows_the_organization_to_specify_a_tailnet">The Tailnet policy allows the organization to specify a tailnet, its identity provider will be used on the login page. If the policy value is prefixed with required:, TapperVPN will force that identity provider to be used and won’t allow logging in with anything else.</string>
-    <string name="required_suggested_tailnet">Required/Suggested Tailnet</string>
+    <string name="the_tailnet_policy_allows_the_organization_to_specify_a_tailnet">The network policy allows the organization to specify a network; its identity provider will be used on the login page. If the policy value is prefixed with required:, TapperVPN will force that identity provider to be used and won\'t allow logging in with anything else.</string>
+    <string name="required_suggested_tailnet">Required/Suggested network</string>
     <string name="custom_control_server_url">Custom control server URL</string>
     <string name="use_this_field_to_specify_a_custom_coordination_server_url_such_as_a_headscale_instance">Use this field to specify a custom coordination server URL, such as a Headscale instance.</string>
     <string name="hidden_network_devices">Hidden network devices</string>
@@ -226,8 +226,8 @@
     <string name="allow_incoming_connections">Allow incoming connections</string>
     <string name="exit_node_picker_visibility">Exit node picker visibility</string>
     <string name="shows_or_hides_the_exit_node_picker_in_the_main_view_of_the_app">Shows or hides the exit node picker in the main view of the app.</string>
-    <string name="shows_or_hides_the_tailnet_lock_configuration_ui">Shows or hides the Tailnet lock configuration UI.</string>
-    <string name="manage_tailnet_lock_visibility">Manage Tailnet lock visibility</string>
+    <string name="shows_or_hides_the_tailnet_lock_configuration_ui">Shows or hides the network lock configuration UI.</string>
+    <string name="manage_tailnet_lock_visibility">Manage network lock visibility</string>
     <string name="shows_or_hides_the_ui_to_run_the_android_device_as_an_exit_node">Shows or hides the UI to run the Android device as an exit node.</string>
     <string name="run_as_exit_node_visibility">Run as exit node visibility</string>
     <string name="defines_an_auth_key_that_will_be_used_for_login">Defines an auth key that will be used for login.</string>
@@ -251,14 +251,14 @@
 
     <!-- Strings for the share activity -->
     <string name="share">Send with Taildrop</string>
-    <string name="share_device_not_connected">Unable to share files with this device. This device is not currently connected to the tailnet.</string>
+    <string name="share_device_not_connected">Unable to share files with this device. This device is not currently connected to TapperVPN.</string>
     <string name="no_files_to_share">No files to share</string>
     <string name="file_count">%1$s files</string>
-    <string name="connect_to_your_tailnet_to_share_files">Connect to your tailnet to share files.</string>
+    <string name="connect_to_your_tailnet_to_share_files">Connect to TapperVPN to share files.</string>
     <string name="my_devices">My devices</string>
     <string name="taildrop_recently_used">Recently used</string>
     <string name="taildrop_all_devices">All devices</string>
-    <string name="no_devices_to_share_with">There are no devices on your tailnet to share to</string>
+    <string name="no_devices_to_share_with">There are no devices on TapperVPN to share to</string>
     <string name="taildrop_share_failed">Taildrop failed. Some files were not shared. Please try again.</string>
     <string name="taildrop_sending">Sending</string>
     <string name="taildrop_share_failed_short">Failed</string>
@@ -275,8 +275,8 @@
     <string name="getStarted">Get Started</string>
     <string name="welcome1">TapperVPN is a mesh VPN for securely connecting your devices.</string>
     <string name="welcome2">All connections are device-to-device, so we never see your data. We collect and use your email address and name, as well as your device name, OS version, and IP address in order to help you to connect your devices and manage your settings. We log when you are connected to your network.</string>
-    <string name="scan_to_connect_to_your_tailnet">Scan this QR code to log in to your tailnet</string>
-    <string name="enter_code_to_connect_to_tailnet">or enter this code in the Machines > Add device section of the admin console: </string>
+    <string name="scan_to_connect_to_your_tailnet">Scan this QR code to log in to TapperVPN</string>
+    <string name="enter_code_to_connect_to_tailnet">then approve this device on the TapperVPN admin page.</string>
 
     <!-- Strings for intent handling -->
     <string name="vpn_is_not_ready_to_start">VPN is not ready to start</string>
@@ -328,9 +328,13 @@
     <!-- Per-app exit nodes (TapperVPN) -->
     <string name="app_exit_nodes">Per-app exit nodes</string>
     <string name="app_exit_nodes_subtitle">Send each app through its own exit node.</string>
-    <string name="app_exit_nodes_explainer">When an app with an exit node is opened, TapperVPN switches to that exit node. Apps set to Normal internet don\'t use the VPN at all. While any app has an exit node, this replaces App split tunneling.</string>
-    <string name="app_exit_nodes_no_usage_access">TapperVPN can\'t see which app is open yet. Grant usage access: adb shell appops set com.tappervpn.ipn GET_USAGE_STATS allow</string>
+    <string name="app_exit_nodes_explainer">Only the apps given an exit node use the VPN; every other app uses your normal internet. If they all use the same exit node, it\'s turned on as soon as TapperVPN connects. If they use different ones, TapperVPN switches to each app\'s exit node when you open it. While any app has an exit node, this replaces App split tunneling.</string>
+    <string name="app_exit_nodes_no_usage_access">These apps use different exit nodes, so TapperVPN needs to see which app is open. Tap here and turn on Usage access for TapperVPN. (Fire TV has no such screen: adb shell appops set com.tappervpn.ipn GET_USAGE_STATS allow)</string>
     <string name="app_exit_nodes_count">%1$d apps with an exit node</string>
+    <string name="usage_access_notice_title">Turn on Usage access</string>
+    <string name="usage_access_notice_body">TapperVPN needs Usage access to send apps through their own exit node (Per-app exit nodes). Tap Open settings, find TapperVPN in the list and turn it on.</string>
+    <string name="usage_access_notice_open">Open settings</string>
+    <string name="usage_access_notice_later">Not now</string>
     <string name="app_exit_nodes_normal">Normal internet</string>
     <string name="app_exit_nodes_offline">%1$s (offline)</string>
     <string name="app_exit_nodes_no_exit_nodes">No exit nodes are available. Turn on Run as exit node on another device first.</string>
@@ -363,7 +367,7 @@
     <string name="multiple_vpn_explainer">Only one VPN can be active, and it appears another is already running. Before starting TapperVPN, disable the other VPN.</string>
     <string name="go_to_settings">Go to Settings</string>
     <string name="subnet_routes">Subnet routes</string>
-    <string name="run_as_subnet_router_header">Advertise routes to machines that are not running TapperVPN to make them available in your tailnet. Routes must be approved in the admin console.</string>
+    <string name="run_as_subnet_router_header">Advertise routes to machines that are not running TapperVPN to make them available on TapperVPN. Routes must be approved on the admin page.</string>
     <string name="open_kb_article">Open KB Article</string>
     <string name="delete_route">Delete route</string>
     <string name="edit_route">Edit route</string>
@@ -381,7 +385,7 @@
     <string name="client_remote_logging_enabled_subtitle">Whether debug &amp; opt-in flow logs are uploaded.</string>
     <string name="client_remote_logging_enabled_subtitle_mdm">Client logging is always enabled for devices under remote management.</string>
     <string name="client_remote_logging_disable_confirm_title">Disable remote client logging?</string>
-    <string name="client_remote_logging_disable_confirm_message">Disabling remote client logging will break Network Flow Logs if enabled and required by your tailnet admin, and will prevent TapperVPN Support from being able to help debug problems with this device.</string>
+    <string name="client_remote_logging_disable_confirm_message">Disabling remote client logging will break Network Flow Logs if enabled and required by your admin, and will prevent TapperVPN Support from being able to help debug problems with this device.</string>
     <string name="client_remote_logging_disable_confirm_button">Yes, disable</string>
     <string name="specifies_a_device_name_to_be_used_instead_of_the_automatic_default">Specifies a device name to be used instead of the automatic default.</string>
     <string name="hostname">Hostname</string>

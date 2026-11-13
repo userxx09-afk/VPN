@@ -1,0 +1,17 @@
+[Unit]
+Description=TapperVPN diagnostics collector (for the admin page)
+After=network-online.target tappervpnd.service
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/vpn-diag/collector.py
+Restart=always
+RestartSec=5
+RuntimeDirectory=vpn-diag
+RuntimeDirectoryMode=0755
+StateDirectory=vpn-diag
+StateDirectoryMode=0755
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

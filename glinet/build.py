@@ -50,6 +50,7 @@ EXECUTABLES = {
     "usr/sbin/tappervpnd",
     "usr/libexec/tappervpn/apply",
     "usr/libexec/tappervpn/update",
+    "usr/libexec/tappervpn/checkin",
 }
 
 POSTINST = """#!/bin/sh
@@ -70,7 +71,7 @@ exit 0
 
 PRERM = """#!/bin/sh
 [ -n "$IPKG_INSTROOT" ] && exit 0
-sed -i "\\#/usr/libexec/tappervpn/update#d" /etc/crontabs/root 2>/dev/null
+sed -i -e "\\#/usr/libexec/tappervpn/update#d" -e "\\#/usr/libexec/tappervpn/checkin#d" /etc/crontabs/root 2>/dev/null
 /etc/init.d/tappervpn stop
 /etc/init.d/tappervpn disable
 exit 0

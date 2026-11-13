@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sys/windows/registry"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
@@ -85,7 +86,32 @@ func install(pkg, tmp string) error {
 		return rollback(fmt.Errorf("starting %s: %w", serviceName, err))
 	}
 	log.Printf("replaced %d files in %s", len(moved), dest)
+	startAppAtSignIn(dest)
 	return nil
+}
+
+// startAppAtSignIn makes sure the TapperVPN app starts at sign-in, for installs
+// made before the app existed (the installer sets this too). The running
+// app restarts itself when its exe is replaced, so nothing else is needed.
+func startAppAtSignIn(dir string) {
+	app := filepath.Join(dir, "tappervpn-gui.exe")
+	if _, err := os.Stat(app); err != nil {
+		return
+	}
+	k, _, err := registry.CreateKey(registry.LOCAL_MACHINE,
+		`Software\Microsoft\Windows\CurrentVersion\Run`, registry.QUERY_VALUE|registry.SET_VALUE)
+	if err != nil {
+		log.Printf("app autostart: %v", err)
+		return
+	}
+	defer k.Close()
+	want := `"` + app + `" -background`
+	if v, _, err := k.GetStringValue("TapperVPN"); err == nil && v == want {
+		return
+	}
+	if err := k.SetStringValue("TapperVPN", want); err != nil {
+		log.Printf("app autostart: %v", err)
+	}
 }
 
 func stop(s *mgr.Service) error {

@@ -23,7 +23,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalDensity
@@ -52,7 +55,14 @@ fun AppExitNodesView(
   val iconSize = 40.dp
   val iconSizePx = with(LocalDensity.current) { iconSize.roundToPx() }
 
-  LaunchedEffect(Unit) { model.refreshUsageAccess() }
+  val needsUsageAccess by model.needsUsageAccess.collectAsState()
+  // Notice when the user comes back from Settings with usage access turned on.
+  LaunchedEffect(Unit) {
+    while (true) {
+      model.refreshUsageAccess()
+      kotlinx.coroutines.delay(2000)
+    }
+  }
 
   pickingFor?.let { app ->
     ExitNodeChoiceDialog(
@@ -64,10 +74,11 @@ fun AppExitNodesView(
     )
   }
 
-  // Apps with an exit node first, then the rest; both alphabetical.
+  var query by rememberSaveable { mutableStateOf("") }
+  // Apps with an exit node first, then the rest; both alphabetical; filtered by the search box.
   val sortedApps =
-      remember(installedApps, assignments) {
-        installedApps.sortedBy { if (assignments.containsKey(it.packageName)) 0 else 1 }
+      remember(installedApps, assignments, query) {
+        installedApps.sortedBy { if (assignments.containsKey(it.packageName)) 0 else 1 }.matching(query)
       }
 
   Scaffold(topBar = { Header(titleRes = R.string.app_exit_nodes, onBack = backToSettings) }) {
@@ -76,9 +87,10 @@ fun AppExitNodesView(
       item("explainer") {
         ListItem(headlineContent = { Text(stringResource(R.string.app_exit_nodes_explainer)) })
       }
-      if (assignments.isNotEmpty() && !hasUsageAccess) {
+      if (needsUsageAccess && !hasUsageAccess) {
         item("usageAccess") {
           ListItem(
+              modifier = Modifier.clickable { model.openUsageAccessSettings() },
               headlineContent = {
                 Text(
                     stringResource(R.string.app_exit_nodes_no_usage_access),
@@ -98,6 +110,7 @@ fun AppExitNodesView(
       item("count") {
         Lists.SectionDivider(stringResource(R.string.app_exit_nodes_count, assignments.size))
       }
+      item("search") { AppSearchField(query) { query = it } }
       items(sortedApps, key = { it.packageName }) { app ->
         val icon =
             remember(app.packageName, iconSizePx) {
