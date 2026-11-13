@@ -10,7 +10,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
+	"net/url"
 	"os/exec"
 	"slices"
 	"strings"
@@ -384,6 +387,33 @@ func (h *hub) SetAllowLAN(on bool) error {
 			ExitNodeAllowLANAccessSet: true,
 		})
 		return err
+	})
+}
+
+// RemoteControl asks the peer with the given stable node ID to accept a
+// screen-view-and-input session. It returns once the request has been sent to
+// the peer (and handed to the user-session helper that owns the viewer window);
+// nothing is shared until that peer accepts the consent prompt on its screen.
+func (h *hub) RemoteControl(id tailcfg.StableNodeID) error {
+	if id == "" {
+		return errors.New("no device given")
+	}
+	return h.do("Requesting control", func(ctx context.Context) error {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+			"http://local-tappervpnd.sock/localapi/v0/remotecontrol/connect?id="+url.QueryEscape(string(id)), nil)
+		if err != nil {
+			return err
+		}
+		resp, err := h.lc.DoLocalRequest(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode/100 != 2 {
+			return fmt.Errorf("%s", strings.TrimSpace(string(body)))
+		}
+		return nil
 	})
 }
 

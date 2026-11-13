@@ -146,10 +146,14 @@ function header() {
 
 function devRow(d, opts = {}) {
   const meta = [d.ip, d.os, d.online ? "" : (d.lastSeen ? "last seen " + d.lastSeen : "offline")].filter(Boolean).join(" · ");
+  const control = d.online && !opts.self
+    ? `<button class="icon-btn" data-control="${esc(d.id)}" data-name="${esc(d.name)}" title="View and control ${esc(d.name)} (it must accept on its screen)">Control</button>`
+    : "";
   return `<div class="row click" data-copy="${esc(d.ip)}" title="Click to copy ${esc(d.ip)}">
     <span class="dot ${d.online ? "on" : ""}"></span>
     <div class="grow"><div class="name">${esc(d.name)} ${d.exitNode && !opts.self ? '<span class="badge">exit node</span>' : ""}</div>
     <div class="meta mono">${esc(meta)}</div></div>
+    ${control}
     <button class="icon-btn" data-copy="${esc(d.ip)}" title="Copy address">Copy</button></div>`;
 }
 
@@ -305,7 +309,7 @@ function settingsCard() {
 }
 
 document.addEventListener("click", async (e) => {
-  const t = e.target.closest("[data-copy],[data-exit],[data-open],[data-armode],[data-arremove],#aradd,#signin,#signout,#check,#install");
+  const t = e.target.closest("[data-copy],[data-control],[data-exit],[data-open],[data-armode],[data-arremove],#aradd,#signin,#signout,#check,#install");
   if (!t) return;
   const ar = m.appRouting || {};
   if (t.dataset.armode) { saveApps(t.dataset.armode, t.dataset.armode === "off" ? [] : ar.apps); if (t.dataset.armode !== "off") loadRunningApps(); return; }
@@ -314,6 +318,12 @@ document.addEventListener("click", async (e) => {
     const v = $("#arnew").value.trim(); if (!v) return;
     const mode = ar.mode === "off" ? (arDraft || "only") : ar.mode;
     saveApps(mode, [...ar.apps, v]); $("#arnew").value = ""; arNewDraft = ""; return;
+  }
+  if (t.dataset.control !== undefined) {
+    e.stopPropagation();
+    const ok = await api("remote-control", {id: t.dataset.control});
+    toast(ok ? "Asked " + (t.dataset.name || "device") + " — allow it on that screen" : "Couldn't start the session");
+    return;
   }
   if (t.dataset.copy !== undefined) { e.stopPropagation(); if (t.dataset.copy) copy(t.dataset.copy); return; }
   if (t.dataset.exit !== undefined) { api("exit-node", {id: t.dataset.exit}); return; }
