@@ -15,7 +15,12 @@ import android.os.Bundle
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.SurfaceHolder
+import android.view.Gravity
+import android.view.ScaleGestureDetector
 import android.view.SurfaceView
+import android.widget.Button
+import android.widget.FrameLayout
+import android.widget.LinearLayout
 import android.widget.Toast
 import com.tappervpn.ipn.util.TSLog
 import kotlin.concurrent.thread
@@ -42,7 +47,20 @@ class RemoteControlViewerActivity : Activity(), libtappervpn.RemoteControlViewer
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     surfaceView = SurfaceView(this)
-    setContentView(surfaceView)
+    val root = FrameLayout(this)
+    root.addView(surfaceView, FrameLayout.LayoutParams(-1, -1))
+    // On a touchscreen, zoom buttons make small boxes and links easy to hit
+    // (pinch to zoom, two fingers to move around also work).
+    if (packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_TOUCHSCREEN)) {
+      root.addView(zoomButtons(), FrameLayout.LayoutParams(-2, -2, Gravity.END or Gravity.BOTTOM))
+    }
+    setContentView(root)
+    scaleDetector = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+      override fun onScale(d: ScaleGestureDetector): Boolean {
+        zoomBy(d.scaleFactor, d.focusX, d.focusY)
+        return true
+      }
+    })
     surfaceView.holder.addCallback(
         object : SurfaceHolder.Callback {
           override fun surfaceCreated(holder: SurfaceHolder) {
@@ -90,7 +108,8 @@ class RemoteControlViewerActivity : Activity(), libtappervpn.RemoteControlViewer
       runOnUiThread {
         Toast.makeText(
                 this,
-                "Remote/arrow keys move around, OK selects, touch to tap · Back to leave",
+                "Remote/arrow keys move around, OK selects, touch to tap · Back to leave" +
+                    zoomHint(),
                 Toast.LENGTH_LONG)
             .show()
       }
@@ -103,7 +122,8 @@ class RemoteControlViewerActivity : Activity(), libtappervpn.RemoteControlViewer
         Toast.makeText(
                 this,
                 "D-pad moves the mouse · OK clicks · hold OK to right-click\n" +
-                    "Rewind/Fast-forward scroll · Menu switches to arrow keys · Back to leave",
+                    "Rewind/Fast-forward scroll · Menu switches to arrow keys · Back to leave" +
+                    zoomHint(),
                 Toast.LENGTH_LONG)
             .show()
       }
@@ -111,6 +131,23 @@ class RemoteControlViewerActivity : Activity(), libtappervpn.RemoteControlViewer
   }
 
   override fun frame(frame: ByteArray) {
+    lastFrame = frame
+    draw(frame)
+  }
+
+  @Volatile private var lastFrame: ByteArray? = null
+  private val drawLock = Any()
+
+  private fun redraw() {
+    val f = lastFrame ?: return
+    thread(name = "rc-redraw") { draw(f) }
+  }
+
+  private fun draw(frame: ByteArray) {
+    synchronized(drawLock) { drawLocked(frame) }
+  }
+
+  private fun drawLocked(frame: ByteArray) {
     if (!surfaceReady) return
     val holder = surfaceView.holder
     val surface = holder.surface
@@ -119,7 +156,7 @@ class RemoteControlViewerActivity : Activity(), libtappervpn.RemoteControlViewer
     val canvas = holder.lockCanvas() ?: run { bmp.recycle(); return }
     try {
       // Fit the whole picture without stretching it; black bars fill the rest.
-      val dst = fitRect(bmp.width, bmp.height, canvas.width, canvas.height)
+      val dst = zoomRect(fitRect(bmp.width, bmp.height, canvas.width, canvas.height), canvas.width, canvas.height)
       drawRect = dst
       canvas.drawColor(Color.BLACK)
       canvas.drawBitmap(bmp, null, dst, paint)
@@ -143,6 +180,86 @@ class RemoteControlViewerActivity : Activity(), libtappervpn.RemoteControlViewer
     val left = (cw - dw) / 2
     val top = (ch - dh) / 2
     return Rect(left, top, left + dw, top + dh)
+  }
+
+  // --- zoom (phones and tablets) ---
+  // zoom 1 = whole screen fits; offX/offY move the enlarged picture around.
+  @Volatile private var zoom = 1f
+  @Volatile private var offX = 0f
+  @Volatile private var offY = 0f
+  private var lastTouchX = -1f
+  private var lastTouchY = -1f
+  private lateinit var scaleDetector: ScaleGestureDetector
+  private var gesture = false // two fingers down: zoom/pan, nothing sent to the other device
+  private var panX = 0f
+  private var panY = 0f
+
+  private fun zoomRect(fit: Rect, cw: Int, ch: Int): Rect {
+    if (zoom <= 1.001f) { offX = 0f; offY = 0f; return fit }
+    val w = fit.width() * zoom
+    val h = fit.height() * zoom
+    // Keep the picture over the screen: no empty space on a side it could fill.
+    val minX = minOf(0f, cw - w); val maxX = maxOf(0f, cw - w)
+    val minY = minOf(0f, ch - h); val maxY = maxOf(0f, ch - h)
+    val cx = (cw - w) / 2 + offX
+    val cy = (ch - h) / 2 + offY
+    val left = if (w > cw) cx.coerceIn(minX, maxX) else (cw - w) / 2
+    val top = if (h > ch) cy.coerceIn(minY, maxY) else (ch - h) / 2
+    offX = left - (cw - w) / 2
+    offY = top - (ch - h) / 2
+    return Rect(left.toInt(), top.toInt(), (left + w).toInt(), (top + h).toInt())
+  }
+
+  /** Zoom by [factor], keeping the point under (fx, fy) on the screen where it is. */
+  private fun zoomBy(factor: Float, fx: Float, fy: Float) {
+    val old = zoom
+    val nz = (zoom * factor).coerceIn(1f, 6f)
+    if (nz == old) return
+    val r = drawRect
+    if (r != null && r.width() > 0) {
+      // Where (fx, fy) sits in the picture now, as a fraction; put it back there after.
+      val px = (fx - r.left) / r.width()
+      val py = (fy - r.top) / r.height()
+      val baseW = r.width() / old
+      val baseH = r.height() / old
+      val cw = surfaceView.width.toFloat()
+      val ch = surfaceView.height.toFloat()
+      val newLeft = fx - px * baseW * nz
+      val newTop = fy - py * baseH * nz
+      offX = newLeft - (cw - baseW * nz) / 2
+      offY = newTop - (ch - baseH * nz) / 2
+    }
+    zoom = nz
+    redraw()
+  }
+
+  private fun zoomHint() =
+      if (packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_TOUCHSCREEN))
+          "\nPinch or + to zoom in · two fingers move around" else ""
+
+  private fun zoomButtons(): LinearLayout {
+    val box = LinearLayout(this)
+    box.orientation = LinearLayout.VERTICAL
+    val pad = (12 * resources.displayMetrics.density).toInt()
+    box.setPadding(pad, pad, pad, pad)
+    fun add(label: String, desc: String, onTap: () -> Unit) {
+      val b = Button(this)
+      b.text = label
+      b.contentDescription = desc
+      b.textSize = 22f
+      b.alpha = 0.8f
+      b.isFocusable = false // the TV remote / keyboard keeps going to the other device
+      b.setOnClickListener { onTap() }
+      val size = (56 * resources.displayMetrics.density).toInt()
+      box.addView(b, LinearLayout.LayoutParams(size, size).apply { topMargin = pad / 2 })
+    }
+    // Zoom in toward the last place you tapped, so a missed box ends up big under your finger.
+    fun focus() = if (lastTouchX >= 0) Pair(lastTouchX, lastTouchY)
+        else Pair(surfaceView.width / 2f, surfaceView.height / 2f)
+    add("+", "Zoom in") { val (x, y) = focus(); zoomBy(1.6f, x, y) }
+    add("−", "Zoom out") { val (x, y) = focus(); zoomBy(1 / 1.6f, x, y) }
+    add("⤢", "Fit the whole screen") { zoom = 1f; offX = 0f; offY = 0f; redraw() }
+    return box
   }
 
   override fun notice(text: String) {
@@ -309,6 +426,32 @@ class RemoteControlViewerActivity : Activity(), libtappervpn.RemoteControlViewer
 
   override fun onTouchEvent(event: MotionEvent?): Boolean {
     event ?: return false
+    scaleDetector.onTouchEvent(event)
+    when (event.actionMasked) {
+      MotionEvent.ACTION_POINTER_DOWN -> {
+        gesture = true
+        panX = (event.getX(0) + event.getX(1)) / 2
+        panY = (event.getY(0) + event.getY(1)) / 2
+        return true
+      }
+      MotionEvent.ACTION_MOVE -> if (gesture && event.pointerCount >= 2) {
+        val mx = (event.getX(0) + event.getX(1)) / 2
+        val my = (event.getY(0) + event.getY(1)) / 2
+        offX += mx - panX
+        offY += my - panY
+        panX = mx
+        panY = my
+        redraw()
+        return true
+      }
+    }
+    if (gesture) {
+      // Two-finger zoom/pan: nothing goes to the other device until all fingers lift.
+      if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) gesture = false
+      return true
+    }
+    lastTouchX = event.x
+    lastTouchY = event.y
     val r = drawRect ?: Rect(0, 0, surfaceView.width.coerceAtLeast(1), surfaceView.height.coerceAtLeast(1))
     val fx = ((event.x - r.left) / r.width().coerceAtLeast(1)).coerceIn(0f, 1f)
     val fy = ((event.y - r.top) / r.height().coerceAtLeast(1)).coerceIn(0f, 1f)

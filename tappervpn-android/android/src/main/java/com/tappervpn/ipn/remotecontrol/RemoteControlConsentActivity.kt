@@ -53,7 +53,7 @@ class RemoteControlConsentActivity : ComponentActivity() {
         if (result.resultCode == Activity.RESULT_OK && result.data != null) {
           RemoteControlManager.projectionResultCode = result.resultCode
           RemoteControlManager.projectionData = result.data
-          if (!RemoteControlAccessibilityService.isEnabled()) openControlSetting()
+          if (!RemoteControlAccessibilityService.isEnabled() && !isFireTv()) openControlSetting()
           finishWith(true)
         } else {
           finishWith(false)
@@ -94,8 +94,13 @@ class RemoteControlConsentActivity : ComponentActivity() {
             if (!RemoteControlAccessibilityService.isEnabled()) {
               Text(
                   text =
-                      "To let them control it (not just watch), turn on TapperVPN in " +
-                          "Accessibility settings. After you choose Allow, they'll open for you.",
+                      if (isFireTv())
+                          "Control (not just watching) isn't switched on for this TV yet. Fire TV " +
+                              "doesn't show it in Accessibility settings: the Tapper Dashboard " +
+                              "turns it on by itself within 15 minutes."
+                      else
+                          "To let them control it (not just watch), turn on TapperVPN in " +
+                              "Accessibility settings. After you choose Allow, they'll open for you.",
                   textAlign = TextAlign.Center,
                   modifier = Modifier.padding(bottom = 16.dp),
               )
@@ -126,6 +131,10 @@ class RemoteControlConsentActivity : ComponentActivity() {
     val mpm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
     projectionLauncher.launch(mpm.createScreenCaptureIntent())
   }
+
+  // Fire TV's Accessibility settings only list Amazon's own services, so the
+  // dashboard on the home server switches ours on over adb instead.
+  private fun isFireTv() = packageManager.hasSystemFeature("amazon.hardware.fire_tv")
 
   /** Opens Accessibility settings so the user can turn on remote control input. */
   private fun openControlSetting() {
