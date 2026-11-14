@@ -108,19 +108,8 @@ func (v *winViewer) run() {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
-	className, _ := syscall.UTF16PtrFromString("TapperVPNRemoteViewer")
+	className := registerViewerClass()
 	title, _ := syscall.UTF16PtrFromString("TapperVPN — " + v.peerName)
-	cursor, _, _ := procDefLoadCursorW.Call(0, idcArrow)
-
-	wndProc := syscall.NewCallback(v.wndProc)
-	wc := wndClassExW{
-		cbSize:        uint32(unsafe.Sizeof(wndClassExW{})),
-		lpfnWndProc:   wndProc,
-		hCursor:       cursor,
-		hbrBackground: colorWindow + 1,
-		lpszClassName: className,
-	}
-	procRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
 
 	hwnd, _, _ := procCreateWindowExW.Call(
 		0,
@@ -133,6 +122,11 @@ func (v *winViewer) run() {
 	v.mu.Lock()
 	v.hwnd = hwnd
 	v.mu.Unlock()
+	if hwnd != 0 {
+		viewersMu.Lock()
+		viewers[hwnd] = v
+		viewersMu.Unlock()
+	}
 	close(v.ready)
 	if hwnd == 0 {
 		return
@@ -150,6 +144,45 @@ func (v *winViewer) run() {
 	}
 }
 
+// All viewer windows share one window class, and Windows keeps the window
+// procedure from the class's first registration. So the class is registered
+// once, with a procedure that finds each window's own viewer; before 0.2.22 a
+// second session's window ran the first viewer's code (its old picture, and
+// input into the closed session).
+var (
+	viewerClassOnce sync.Once
+	viewerClassName *uint16
+	viewersMu       sync.Mutex
+	viewers         = map[uintptr]*winViewer{}
+)
+
+func registerViewerClass() *uint16 {
+	viewerClassOnce.Do(func() {
+		viewerClassName, _ = syscall.UTF16PtrFromString("TapperVPNRemoteViewer")
+		cursor, _, _ := procDefLoadCursorW.Call(0, idcArrow)
+		wc := wndClassExW{
+			cbSize:        uint32(unsafe.Sizeof(wndClassExW{})),
+			lpfnWndProc:   syscall.NewCallback(viewerWndProc),
+			hCursor:       cursor,
+			hbrBackground: colorWindow + 1,
+			lpszClassName: viewerClassName,
+		}
+		procRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
+	})
+	return viewerClassName
+}
+
+func viewerWndProc(hwnd, msg, wparam, lparam uintptr) uintptr {
+	viewersMu.Lock()
+	v := viewers[hwnd]
+	viewersMu.Unlock()
+	if v == nil { // messages sent while the window is still being created
+		r, _, _ := procDefWindowProcW.Call(hwnd, msg, wparam, lparam)
+		return r
+	}
+	return v.wndProc(hwnd, msg, wparam, lparam)
+}
+
 func (v *winViewer) wndProc(hwnd, msg, wparam, lparam uintptr) uintptr {
 	switch msg {
 	case wmPaint:
@@ -159,6 +192,9 @@ func (v *winViewer) wndProc(hwnd, msg, wparam, lparam uintptr) uintptr {
 		procDestroyWindow.Call(hwnd)
 		return 0
 	case wmDestroy:
+		viewersMu.Lock()
+		delete(viewers, hwnd)
+		viewersMu.Unlock()
 		v.closeInput()
 		procPostQuitMessage.Call(0)
 		return 0

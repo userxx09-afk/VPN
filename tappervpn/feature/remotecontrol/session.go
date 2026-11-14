@@ -166,6 +166,15 @@ func RunControllerSession(ctx context.Context, rw io.ReadWriter, viewer Viewer, 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	fc := newFrameConn(rw)
+	// Closing the viewer cancels ctx; closing the link then ends the session at
+	// once (the other device stops sharing) instead of when the next frame arrives.
+	go func() {
+		<-ctx.Done()
+		_ = fc.writeControl(ControlMessage{Type: CtBye})
+		if c, ok := rw.(io.Closer); ok {
+			_ = c.Close()
+		}
+	}()
 
 	if err := fc.writeControl(ControlMessage{
 		Type:  CtHello,
