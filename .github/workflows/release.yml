@@ -256,7 +256,9 @@ jobs:
       - name: Keep the unsigned build (dry run)
         if: env.DRY_RUN == 'true'
         uses: actions/upload-artifact@v4
+        continue-on-error: true  # storage quota full must not fail a release
         with:
+          retention-days: 3
           name: release-dry-run-${{ env.VERSION }}
           path: bin/release/out/
 
