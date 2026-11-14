@@ -30,7 +30,16 @@ newer() {
 	return 1
 }
 
-fetch() { uclient-fetch -q -T 60 -O "$2" "$1"; }
+# Prefer curl: the uclient-fetch on older GL.iNet firmware (OpenWrt 18.06,
+# 2018 build) hangs connecting to github.com, so release downloads fail even
+# though the API call works. curl (OpenSSL) handles it fine.
+fetch() {
+	if command -v curl >/dev/null; then
+		curl -sSfL --connect-timeout 30 -m 300 -o "$2" "$1"
+	else
+		uclient-fetch -q -T 60 -O "$2" "$1"
+	fi
+}
 
 [ -n "$ARCH" ] || fail "unknown router CPU (/usr/share/tappervpn/arch missing)"
 command -v usign >/dev/null || fail "usign not found; can't verify updates, so not updating"
