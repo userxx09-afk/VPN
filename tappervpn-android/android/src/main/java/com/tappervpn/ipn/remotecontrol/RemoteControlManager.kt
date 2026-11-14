@@ -116,7 +116,7 @@ object RemoteControlManager : libtappervpn.RemoteControlHost {
   @Throws(Exception::class)
   override fun startCapture(codec: String) {
     if (projectionData == null) {
-      throw IllegalStateException("no screen-capture permission granted")
+      throw IllegalStateException("screen sharing wasn't allowed there (the second, system prompt was declined)")
     }
     RemoteControlHostService.start(appContext, projectionResultCode, projectionData!!)
   }

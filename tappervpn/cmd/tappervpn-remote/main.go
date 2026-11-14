@@ -16,6 +16,7 @@ import (
 
 	"tappervpn.com/client/local"
 	"tappervpn.com/paths"
+	"tappervpn.com/updater"
 )
 
 // dialUpgrade opens a raw bidirectional connection to a local daemon endpoint by
@@ -52,8 +53,13 @@ const agentURL = "http://local-tappervpnd.sock/localapi/v0/remotecontrol/agent"
 func main() {
 	log.SetPrefix("tappervpn-remote: ")
 	log.SetFlags(0)
+	setupLog()
+	if !singleInstance() {
+		log.Printf("another helper is already running in this session; exiting")
+		return
+	}
 
-	log.Printf("starting; daemon socket=%s", paths.DefaultTapperVPNdSocket())
+	log.Printf("starting %s; daemon socket=%s", updater.Version, paths.DefaultTapperVPNdSocket())
 
 	platform, err := newHostPlatform()
 	if err != nil {

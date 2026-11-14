@@ -87,6 +87,7 @@ func RunHostSession(ctx context.Context, rw io.ReadWriter, agent HostAgent, req 
 
 	frames, err := agent.StartCapture(ctx, codec)
 	if err != nil {
+		_ = fc.writeControl(ControlMessage{Type: CtBye, Bye: &Bye{Reason: "The other device couldn't share its screen: " + err.Error()}})
 		return fmt.Errorf("starting capture: %w", err)
 	}
 

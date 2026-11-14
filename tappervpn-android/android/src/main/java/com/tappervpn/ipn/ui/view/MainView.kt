@@ -857,8 +857,12 @@ fun PeerList(
                 }
               },
               supportingContent = {
+                // "100.64.0.5 · windows", like the Windows app, so you can
+                // tell which device is which.
+                val ip = peer.Addresses?.first()?.split("/")?.first() ?: ""
+                val os = peer.Hostinfo.OS?.takeIf { it.isNotBlank() }
                 Text(
-                    text = peer.Addresses?.first()?.split("/")?.first() ?: "",
+                    text = listOfNotNull(ip.takeIf { it.isNotEmpty() }, os).joinToString(" · "),
                     style =
                         MaterialTheme.typography.bodyMedium.copy(
                             lineHeight = MaterialTheme.typography.titleMedium.lineHeight

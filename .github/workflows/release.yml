@@ -115,6 +115,9 @@ jobs:
           done
           # The TapperVPN app (window + taskbar icon), a GUI exe.
           go build -trimpath -ldflags "$LDFLAGS -H windowsgui" -o "$STAGE/windows/tappervpn-gui.exe" ./cmd/tappervpn-gui
+          # Remote-control helper (screen capture, input, consent, viewer window);
+          # runs in the user's session, started and kept running by the app.
+          go build -trimpath -ldflags "$LDFLAGS -H windowsgui" -o "$STAGE/windows/tappervpn-remote.exe" ./cmd/tappervpn-remote
           # wintun.dll: WireGuard LLC's signed tunnel driver, pinned by hash.
           curl -fsSL -o "$RUNNER_TEMP/wintun.zip" https://www.wintun.net/builds/wintun-0.14.1.zip
           unzip -q -o "$RUNNER_TEMP/wintun.zip" -d "$RUNNER_TEMP/wintun"

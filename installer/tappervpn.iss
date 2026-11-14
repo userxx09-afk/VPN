@@ -65,6 +65,8 @@ Source: "{#Payload}\tappervpn.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Payload}\tappervpnd.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Payload}\tappervpn-updater.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Payload}\tappervpn-gui.exe"; DestDir: "{app}"; Flags: ignoreversion
+; Remote control helper (capture, input, consent, viewer); the app starts it.
+Source: "{#Payload}\tappervpn-remote.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "{#Payload}\wintun.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "update-task.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "tappervpn.ico"; DestDir: "{app}"; Flags: ignoreversion
@@ -78,6 +80,7 @@ Root: HKLM64; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType
 
 [UninstallRun]
 Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM tappervpn-gui.exe"; Flags: runhidden waituntilterminated; RunOnceId: "StopApp"
+Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM tappervpn-remote.exe"; Flags: runhidden waituntilterminated; RunOnceId: "StopRemoteHelper"
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\update-task.ps1"" -Uninstall"; Flags: runhidden waituntilterminated; RunOnceId: "RemoveUpdateTask"
 Filename: "{app}\tappervpnd.exe"; Parameters: "uninstall-system-daemon"; Flags: runhidden waituntilterminated; RunOnceId: "RemoveService"
 
@@ -160,6 +163,7 @@ begin
   Result := '';
   { Stop running copies so their files can be replaced. }
   Run(ExpandConstant('{sys}\taskkill.exe'), '/F /IM tappervpn-gui.exe');
+  Run(ExpandConstant('{sys}\taskkill.exe'), '/F /IM tappervpn-remote.exe');
   if ServiceExists() then
     Run(ExpandConstant('{sys}\net.exe'), 'stop ' + ServiceName);
 end;

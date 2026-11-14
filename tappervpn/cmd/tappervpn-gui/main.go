@@ -101,6 +101,7 @@ func main() {
 	t := &tray{hub: h, open: func() { openWindow(appURL) }}
 	go h.run()
 	go watchUpdate()
+	go superviseHelper()
 	if !*background {
 		go func() {
 			time.Sleep(300 * time.Millisecond)

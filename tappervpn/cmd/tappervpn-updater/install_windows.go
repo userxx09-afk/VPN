@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -87,7 +88,21 @@ func install(pkg, tmp string) error {
 	}
 	log.Printf("replaced %d files in %s", len(moved), dest)
 	startAppAtSignIn(dest)
+	restartRemoteHelper()
 	return nil
+}
+
+// restartRemoteHelper stops any running remote-control helper so the new exe
+// takes over: the TapperVPN app (itself restarted from its new exe) starts the
+// helper again within seconds. Without this an old helper keeps running the
+// previous version until the user signs out.
+func restartRemoteHelper() {
+	out, err := exec.Command("taskkill.exe", "/F", "/IM", "tappervpn-remote.exe").CombinedOutput()
+	if err != nil {
+		log.Printf("stopping remote helper (may not be running): %v: %s", err, strings.TrimSpace(string(out)))
+		return
+	}
+	log.Printf("stopped the old remote helper; the app restarts it")
 }
 
 // startAppAtSignIn makes sure the TapperVPN app starts at sign-in, for installs

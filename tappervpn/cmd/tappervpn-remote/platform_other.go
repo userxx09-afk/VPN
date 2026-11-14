@@ -13,3 +13,6 @@ import "errors"
 func newHostPlatform() (Platform, error) {
 	return nil, errors.New("the remote-control helper is only supported on Windows")
 }
+
+func singleInstance() bool { return true }
+func setupLog()            {}

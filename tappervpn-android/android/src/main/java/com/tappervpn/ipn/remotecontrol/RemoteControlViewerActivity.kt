@@ -13,6 +13,7 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import android.widget.Toast
 import com.tappervpn.ipn.util.TSLog
 import kotlin.concurrent.thread
 
@@ -80,6 +81,21 @@ class RemoteControlViewerActivity : Activity(), libtappervpn.RemoteControlViewer
   override fun start(codec: String, width: Int, height: Int, hostKind: String) {
     hostW = width
     hostH = height
+    // A PC needs a mouse, which a TV remote doesn't have: the D-pad moves a
+    // pointer instead (Menu switches back to arrow keys).
+    if (hostKind == "windows") {
+      pointerX = width / 2
+      pointerY = height / 2
+      pointerMode = true
+      runOnUiThread {
+        Toast.makeText(
+                this,
+                "D-pad moves the mouse · OK clicks · hold OK to right-click\n" +
+                    "Rewind/Fast-forward scroll · Menu switches to arrow keys · hold Back to exit",
+                Toast.LENGTH_LONG)
+            .show()
+      }
+    }
   }
 
   override fun frame(frame: ByteArray) {
@@ -110,12 +126,100 @@ class RemoteControlViewerActivity : Activity(), libtappervpn.RemoteControlViewer
 
   // --- input forwarding ---
 
+  // Pointer mode (controlling a PC from a TV remote): host-pixel position.
+  @Volatile private var pointerMode = false
+  @Volatile private var pointerX = 0
+  @Volatile private var pointerY = 0
+  private var okLongPressed = false
+
   override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+    // Holding Back leaves the session (a short press is sent as Esc/Back).
+    if (keyCode == KeyEvent.KEYCODE_BACK && (event?.repeatCount ?: 0) > 0) {
+      finish()
+      return true
+    }
+    if (pointerKeyDown(keyCode, event)) return true
     if (forwardKey(keyCode, event)) return true
     return super.onKeyDown(keyCode, event)
   }
 
+  private fun pointerKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+    when (keyCode) {
+      KeyEvent.KEYCODE_MENU -> {
+        if ((event?.repeatCount ?: 0) == 0 && hostW > 0) {
+          pointerMode = !pointerMode
+          Toast.makeText(
+                  this,
+                  if (pointerMode) "D-pad moves the mouse" else "D-pad sends arrow keys",
+                  Toast.LENGTH_SHORT)
+              .show()
+        }
+        return true
+      }
+      KeyEvent.KEYCODE_MEDIA_REWIND,
+      KeyEvent.KEYCODE_CHANNEL_UP,
+      KeyEvent.KEYCODE_PAGE_UP -> {
+        app.sendRemoteControlInput(RC.SCROLL, 0, 3, 0, true, 0, "")
+        return true
+      }
+      KeyEvent.KEYCODE_MEDIA_FAST_FORWARD,
+      KeyEvent.KEYCODE_CHANNEL_DOWN,
+      KeyEvent.KEYCODE_PAGE_DOWN -> {
+        app.sendRemoteControlInput(RC.SCROLL, 0, -3, 0, true, 0, "")
+        return true
+      }
+    }
+    if (!pointerMode) return false
+    val repeat = event?.repeatCount ?: 0
+    // Small steps for a tap, speeding up while the button is held.
+    val base = (hostW / 120).coerceAtLeast(4)
+    val step = base * (1 + repeat.coerceAtMost(12))
+    when (keyCode) {
+      KeyEvent.KEYCODE_DPAD_UP -> pointerY -= step
+      KeyEvent.KEYCODE_DPAD_DOWN -> pointerY += step
+      KeyEvent.KEYCODE_DPAD_LEFT -> pointerX -= step
+      KeyEvent.KEYCODE_DPAD_RIGHT -> pointerX += step
+      KeyEvent.KEYCODE_DPAD_CENTER,
+      KeyEvent.KEYCODE_ENTER,
+      KeyEvent.KEYCODE_NUMPAD_ENTER -> {
+        if (repeat == 0) okLongPressed = false
+        if (repeat == 15 && !okLongPressed) { // held about half a second
+          okLongPressed = true
+          click(1)
+        }
+        return true // a normal click is sent on release
+      }
+      else -> return false
+    }
+    pointerX = pointerX.coerceIn(0, (hostW - 1).coerceAtLeast(0))
+    pointerY = pointerY.coerceIn(0, (hostH - 1).coerceAtLeast(0))
+    app.sendRemoteControlInput(RC.POINTER_MOVE, pointerX, pointerY, 0, true, 0, "")
+    return true
+  }
+
+  private fun click(button: Int) {
+    app.sendRemoteControlInput(RC.POINTER_MOVE, pointerX, pointerY, 0, true, 0, "")
+    app.sendRemoteControlInput(RC.POINTER_BUTTON, pointerX, pointerY, button, true, 0, "")
+    app.sendRemoteControlInput(RC.POINTER_BUTTON, pointerX, pointerY, button, false, 0, "")
+  }
+
   override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
+    if (pointerMode) {
+      when (keyCode) {
+        KeyEvent.KEYCODE_DPAD_UP,
+        KeyEvent.KEYCODE_DPAD_DOWN,
+        KeyEvent.KEYCODE_DPAD_LEFT,
+        KeyEvent.KEYCODE_DPAD_RIGHT -> return true
+        KeyEvent.KEYCODE_DPAD_CENTER,
+        KeyEvent.KEYCODE_ENTER,
+        KeyEvent.KEYCODE_NUMPAD_ENTER -> {
+          if (!okLongPressed) click(0)
+          okLongPressed = false
+          return true
+        }
+      }
+    }
+    if (keyCode == KeyEvent.KEYCODE_MENU) return true
     val nav = keyCodeToNav(keyCode)
     if (nav != 0) {
       app.sendRemoteControlInput(RC.NAV, 0, 0, nav, true, 0, "")
@@ -155,6 +259,8 @@ class RemoteControlViewerActivity : Activity(), libtappervpn.RemoteControlViewer
     val vh = surfaceView.height.coerceAtLeast(1)
     val hx = (event.x / vw * hostW).toInt()
     val hy = (event.y / vh * hostH).toInt()
+    pointerX = hx
+    pointerY = hy
     when (event.actionMasked) {
       MotionEvent.ACTION_DOWN,
       MotionEvent.ACTION_MOVE -> app.sendRemoteControlInput(RC.POINTER_MOVE, hx, hy, 0, true, 0, "")

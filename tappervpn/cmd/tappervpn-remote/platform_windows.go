@@ -29,6 +29,10 @@ var (
 	procReleaseDC        = user32.NewProc("ReleaseDC")
 	procMessageBoxW      = user32.NewProc("MessageBoxW")
 	procSendInput        = user32.NewProc("SendInput")
+	procGetCursorInfo    = user32.NewProc("GetCursorInfo")
+	procGetIconInfo      = user32.NewProc("GetIconInfo")
+	procDrawIconEx       = user32.NewProc("DrawIconEx")
+	procSetDPIAware      = user32.NewProc("SetProcessDPIAware")
 
 	procCreateCompatibleDC     = gdi32.NewProc("CreateCompatibleDC")
 	procCreateCompatibleBitmap = gdi32.NewProc("CreateCompatibleBitmap")
@@ -75,7 +79,46 @@ type windowsHost struct {
 	controlledBy atomic.Value // string
 }
 
-func newHostPlatform() (Platform, error) { return &windowsHost{}, nil }
+func newHostPlatform() (Platform, error) {
+	// Work in real pixels: otherwise on a scaled display (125%, 150%...) the
+	// screen size, the capture and the click positions are all virtualized.
+	procSetDPIAware.Call()
+	return &windowsHost{}, nil
+}
+
+type cursorInfo struct {
+	cbSize  uint32
+	flags   uint32
+	hCursor uintptr
+	x, y    int32
+}
+
+type iconInfo struct {
+	fIcon              int32
+	xHotspot, yHotspot uint32
+	hbmMask, hbmColor  uintptr
+}
+
+// drawCursor paints the mouse pointer onto dc: a GDI screen grab leaves it
+// out, and without it the person controlling can't see where they point.
+func drawCursor(dc uintptr) {
+	ci := cursorInfo{cbSize: uint32(unsafe.Sizeof(cursorInfo{}))}
+	if r, _, _ := procGetCursorInfo.Call(uintptr(unsafe.Pointer(&ci))); r == 0 || ci.flags&1 == 0 || ci.hCursor == 0 {
+		return // hidden or unavailable
+	}
+	var ii iconInfo
+	if r, _, _ := procGetIconInfo.Call(ci.hCursor, uintptr(unsafe.Pointer(&ii))); r != 0 {
+		if ii.hbmMask != 0 {
+			procDeleteObject.Call(ii.hbmMask)
+		}
+		if ii.hbmColor != 0 {
+			procDeleteObject.Call(ii.hbmColor)
+		}
+	}
+	const diNormal = 0x0003
+	procDrawIconEx.Call(dc, uintptr(ci.x-int32(ii.xHotspot)), uintptr(ci.y-int32(ii.yHotspot)),
+		ci.hCursor, 0, 0, 0, 0, diNormal)
+}
 
 func (h *windowsHost) Kind() string       { return "windows" }
 func (h *windowsHost) Codecs() []rc.Codec { return []rc.Codec{rc.CodecMJPEG} }
@@ -144,6 +187,9 @@ func (h *windowsHost) StartCapture(ctx context.Context, codec rc.Codec, sink fun
 		case <-ticker.C:
 		}
 		blt, _, _ := procBitBlt.Call(memDC, 0, 0, uintptr(w), uintptr(ht), screenDC, 0, 0, srcCopy)
+		if blt != 0 {
+			drawCursor(memDC)
+		}
 		// GetDIBits requires the bitmap not be selected into a DC.
 		procSelectObject.Call(memDC, oldBmp)
 		r, _, _ := procGetDIBits.Call(memDC, bmp, 0, uintptr(ht),
