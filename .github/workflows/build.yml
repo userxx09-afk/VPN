@@ -52,7 +52,6 @@ jobs:
         uses: actions/upload-artifact@v4
         continue-on-error: true  # storage quota full must not fail a release
         with:
-          retention-days: 3
           name: tappervpn-windows-unsigned
           path: ${{ runner.temp }}/windows/*.exe
           if-no-files-found: error
@@ -130,7 +129,6 @@ jobs:
         uses: actions/upload-artifact@v4
         continue-on-error: true  # storage quota full must not fail a release
         with:
-          retention-days: 3
           name: tappervpn-debug-apk
           path: tappervpn-android/android/build/outputs/apk/debug/android-debug.apk
           if-no-files-found: error

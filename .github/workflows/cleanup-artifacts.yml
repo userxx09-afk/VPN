@@ -1,0 +1,39 @@
+# Deletes old Actions artifacts (temporary build copies, not releases) so the
+# account's artifact storage quota doesn't fill up and fail builds. Keeps the
+# newest KEEP artifacts of each name; releases are never touched.
+# Runs weekly, and by hand from the Actions tab.
+name: Clean up artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      keep:
+        description: How many of each artifact to keep (newest first)
+        default: "10"
+  schedule:
+    - cron: "17 6 * * 0"
+
+permissions:
+  actions: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete all but the newest artifacts of each name
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          KEEP: ${{ inputs.keep || '10' }}
+        run: |
+          gh api --paginate "repos/$REPO/actions/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.expired | not) | [.name, .created_at, .id, .size_in_bytes] | @tsv' \
+            | sort -t$'\t' -k1,1 -k2,2r > all.tsv
+          echo "$(wc -l < all.tsv) artifacts, $(awk -F'\t' '{s+=$4} END {printf "%.0f", s/1048576}' all.tsv) MB"
+          awk -F'\t' -v keep="$KEEP" '{ if (++n[$1] > keep) print $3 "\t" $1 "\t" $4 }' all.tsv > delete.tsv
+          freed=0
+          while IFS=$'\t' read -r id name size; do
+            gh api -X DELETE "repos/$REPO/actions/artifacts/$id" && freed=$((freed + size))
+          done < delete.tsv
+          echo "Deleted $(wc -l < delete.tsv) artifacts, freed $((freed / 1048576)) MB."
+          echo "GitHub recalculates storage usage every 6-12 hours."

@@ -137,7 +137,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         continue-on-error: true  # storage quota full must not fail a release
         with:
-          retention-days: 3
           name: TapperVPN-Setup-${{ env.VERSION }}
           path: dist/TapperVPN-Setup.exe
 
