@@ -277,7 +277,14 @@ func ServeAgentLink(rw io.ReadWriter, logf logger.Logf) error {
 	a.handleControl(info)
 
 	RegisterHostAgent(a)
-	defer RegisterHostAgent(nil)
+	defer func() {
+		// Only clear it if a newer helper hasn't taken over meanwhile.
+		platformMu.Lock()
+		if hostAgent == HostAgent(a) {
+			hostAgent = nil
+		}
+		platformMu.Unlock()
+	}()
 	currentHelper.Store(a)
 	defer currentHelper.CompareAndSwap(a, nil)
 	logf("remotecontrol: helper attached (kind=%s, %dx%d)", a.Kind(), a.screen.Width, a.screen.Height)
