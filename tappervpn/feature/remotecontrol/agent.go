@@ -43,7 +43,7 @@ func attachedHelper() *helperHostAgent { return currentHelper.Load() }
 
 // AgentMessage is the JSON carried on the ChControl channel of the helper link.
 type AgentMessage struct {
-	T string `json:"t"` // "info" | "consent" | "consent-reply" | "capture-start" | "capture-stop" | "session-start" | "session-end" | "end"
+	T string `json:"t"` // "info" | "consent" | "consent-reply" | "capture-start" | "capture-stop" | "capture-error" | "session-start" | "session-end" | "end"
 
 	// info
 	Kind   string   `json:"kind,omitempty"`
@@ -58,6 +58,9 @@ type AgentMessage struct {
 
 	// capture
 	Codec string `json:"codec,omitempty"`
+
+	// capture-error
+	Error string `json:"error,omitempty"`
 }
 
 // helperHostAgent implements HostAgent by talking to the attached helper over
@@ -73,6 +76,7 @@ type helperHostAgent struct {
 	screen      ScreenSize
 	consentWait chan bool
 	captureCh   chan []byte
+	captureErr  string
 	sessionStop func()
 }
 
@@ -120,6 +124,7 @@ func (a *helperHostAgent) StartCapture(ctx context.Context, codec Codec) (<-chan
 	ch := make(chan []byte, 8)
 	a.mu.Lock()
 	a.captureCh = ch
+	a.captureErr = ""
 	a.mu.Unlock()
 	if err := a.send(AgentMessage{T: "capture-start", Codec: string(codec)}); err != nil {
 		a.mu.Lock()
@@ -138,6 +143,13 @@ func (a *helperHostAgent) StartCapture(ctx context.Context, codec Codec) (<-chan
 		a.mu.Unlock()
 	}()
 	return ch, nil
+}
+
+// CaptureError reports why the helper's last capture failed, if it did.
+func (a *helperHostAgent) CaptureError() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.captureErr
 }
 
 func (a *helperHostAgent) InjectInput(e InputEvent) {
@@ -224,6 +236,14 @@ func (a *helperHostAgent) handleControl(m AgentMessage) {
 			default:
 			}
 		}
+	case "capture-error": // the helper couldn't capture; end the stream
+		a.mu.Lock()
+		a.captureErr = m.Error
+		if a.captureCh != nil {
+			close(a.captureCh)
+			a.captureCh = nil
+		}
+		a.mu.Unlock()
 	case "end": // helper's kill switch
 		a.mu.Lock()
 		stop := a.sessionStop

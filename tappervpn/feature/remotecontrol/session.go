@@ -5,6 +5,7 @@ package remotecontrol
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -93,19 +94,30 @@ func RunHostSession(ctx context.Context, rw io.ReadWriter, agent HostAgent, req 
 	readErr := make(chan error, 1)
 	go func() { readErr <- hostReadLoop(fc, agent, logf) }()
 
+	// If capture fails silently (it runs in another process or service on most
+	// platforms), no frame ever arrives. Rather than leave the controller
+	// staring at an empty window, end the session and say why.
+	firstFrame := time.NewTimer(firstFrameTimeout)
+	defer firstFrame.Stop()
+	firstFrameC := firstFrame.C
+
 	// Writer loop: pump captured frames until capture stops or ctx ends.
 	for {
 		select {
 		case <-ctx.Done():
-			_ = fc.writeControl(ControlMessage{Type: CtBye, Bye: &Bye{Reason: "host ended session"}})
+			_ = fc.writeControl(ControlMessage{Type: CtBye, Bye: &Bye{Reason: "The other device ended the session."}})
 			return ctx.Err()
 		case err := <-readErr:
 			return err
+		case <-firstFrameC:
+			_ = fc.writeControl(ControlMessage{Type: CtBye, Bye: &Bye{Reason: captureFailedReason(agent)}})
+			return errors.New("no frames captured")
 		case frame, ok := <-frames:
 			if !ok {
-				_ = fc.writeControl(ControlMessage{Type: CtBye, Bye: &Bye{Reason: "capture stopped"}})
+				_ = fc.writeControl(ControlMessage{Type: CtBye, Bye: &Bye{Reason: captureFailedReason(agent)}})
 				return nil
 			}
+			firstFrameC = nil
 			if err := fc.write(ChVideo, frame); err != nil {
 				return fmt.Errorf("writing video: %w", err)
 			}
@@ -177,6 +189,7 @@ func RunControllerSession(ctx context.Context, rw io.ReadWriter, viewer Viewer, 
 		return fmt.Errorf("starting viewer: %w", err)
 	}
 	defer viewer.Close()
+	setViewerStatus(viewer, "Connected. Waiting for the picture…", false)
 
 	// Input pump: user events from the viewer to the host.
 	go func() {
@@ -206,6 +219,9 @@ func RunControllerSession(ctx context.Context, rw io.ReadWriter, viewer Viewer, 
 		}
 		ch, payload, err := fc.read()
 		if err != nil {
+			if ctx.Err() == nil {
+				setViewerStatus(viewer, "The connection to the other device was lost.", true)
+			}
 			if err == io.EOF {
 				return nil
 			}
@@ -226,11 +242,49 @@ func RunControllerSession(ctx context.Context, rw io.ReadWriter, viewer Viewer, 
 					viewer.Resize(*m.Resize)
 				}
 			case CtBye:
+				reason := "The other device ended the session."
+				if m.Bye != nil && m.Bye.Reason != "" {
+					reason = m.Bye.Reason
+				}
+				setViewerStatus(viewer, reason, true)
 				return nil
 			}
 		}
 	}
 }
+
+// StatusViewer is optionally implemented by a Viewer that can show a line of
+// text to the user (e.g. "Waiting for the picture…", or why a session ended).
+// When final is true the session is over; the viewer should keep the message
+// visible until the user dismisses it rather than vanishing on Close.
+type StatusViewer interface {
+	Status(msg string, final bool)
+}
+
+func setViewerStatus(v Viewer, msg string, final bool) {
+	if sv, ok := v.(StatusViewer); ok {
+		sv.Status(msg, final)
+	}
+}
+
+// CaptureErrorer is optionally implemented by a HostAgent that knows why its
+// capture failed, so the controller can be told something useful.
+type CaptureErrorer interface {
+	CaptureError() string
+}
+
+func captureFailedReason(agent HostAgent) string {
+	if ce, ok := agent.(CaptureErrorer); ok {
+		if msg := ce.CaptureError(); msg != "" {
+			return "The other device couldn't share its screen: " + msg
+		}
+	}
+	return "The other device accepted, but couldn't share its screen."
+}
+
+// firstFrameTimeout is how long a host waits for its first captured frame
+// before giving up on the session as a capture failure.
+var firstFrameTimeout = 15 * time.Second
 
 // chooseCodec picks the first host codec that the controller also supports.
 func chooseCodec(hostCodecs, controllerCodecs []Codec) (Codec, bool) {

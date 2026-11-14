@@ -125,6 +125,7 @@ func runHostHelper(ctx context.Context, r io.Reader, lw *linkWriter, p Platform,
 				go func() {
 					if err := p.StartCapture(cctx, codec, func(f []byte) { lw.frame(rc.ChVideo, f) }); err != nil {
 						logf("capture: %v", err)
+						lw.control(rc.AgentMessage{T: "capture-error", Error: err.Error()})
 					}
 				}()
 			case "capture-stop":

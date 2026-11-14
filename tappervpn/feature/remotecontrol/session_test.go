@@ -6,6 +6,7 @@ package remotecontrol
 import (
 	"context"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -175,4 +176,50 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 		time.Sleep(2 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s", what)
+}
+
+// statusViewer records the status lines a session reports.
+type statusViewer struct {
+	*fakeViewer
+	smu    sync.Mutex
+	status []string
+	final  bool
+}
+
+func (v *statusViewer) Status(msg string, final bool) {
+	v.smu.Lock()
+	defer v.smu.Unlock()
+	v.status = append(v.status, msg)
+	if final {
+		v.final = true
+	}
+}
+
+// TestNoFramesEndsSessionWithReason checks that a host whose capture never
+// produces a frame ends the session and tells the controller why, instead of
+// leaving the viewer blank forever.
+func TestNoFramesEndsSessionWithReason(t *testing.T) {
+	old := firstFrameTimeout
+	firstFrameTimeout = 200 * time.Millisecond
+	defer func() { firstFrameTimeout = old }()
+
+	hostConn, ctrlConn := net.Pipe()
+	agent := newFakeAgent() // never sends a frame
+	viewer := &statusViewer{fakeViewer: newFakeViewer()}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go RunHostSession(ctx, hostConn, agent, ConsentRequest{PeerName: "ctrl"}, t.Logf)
+	if err := RunControllerSession(ctx, ctrlConn, viewer, t.Logf); err != nil {
+		t.Fatalf("controller session: %v", err)
+	}
+	viewer.smu.Lock()
+	defer viewer.smu.Unlock()
+	if !viewer.final {
+		t.Fatalf("session ended without a final status; got %q", viewer.status)
+	}
+	last := viewer.status[len(viewer.status)-1]
+	if !strings.Contains(last, "couldn't share its screen") {
+		t.Fatalf("final status = %q, want a capture-failure reason", last)
+	}
 }

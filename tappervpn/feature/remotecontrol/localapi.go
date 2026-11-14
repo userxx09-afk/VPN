@@ -126,7 +126,12 @@ func serveDial(h *localapi.Handler, w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var se *httpStatusError
 		if errors.As(err, &se) {
-			http.Error(w, "peer declined", se.code)
+			// Pass the peer's own reason through (declined, not available...).
+			msg := se.msg
+			if msg == "" {
+				msg = http.StatusText(se.code)
+			}
+			http.Error(w, msg, se.code)
 		} else {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 		}

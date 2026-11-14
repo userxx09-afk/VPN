@@ -84,12 +84,26 @@ class RemoteControlHostService : Service() {
     val proj = mpm.getMediaProjection(resultCode, data) ?: throw IllegalStateException("null projection")
     projection = proj
 
-    val (width, height, dpi) = displayInfo()
-    val (encW, encH) = scaleToMax(width, height, 1280)
-
     val thread = HandlerThread("rc-capture").also { it.start() }
     captureThread = thread
     val handler = Handler(thread.looper)
+
+    // Android 14+ refuses createVirtualDisplay unless a callback is registered
+    // first ("Must register a callback before starting capture"); without it
+    // capture never starts and the controller sees an empty window.
+    proj.registerCallback(
+        object : MediaProjection.Callback() {
+          override fun onStop() {
+            TSLog.d(TAG, "projection stopped by the system")
+            stopEverything()
+            stopSelf()
+          }
+        },
+        handler,
+    )
+
+    val (width, height, dpi) = displayInfo()
+    val (encW, encH) = scaleToMax(width, height, 1280)
 
     val reader = ImageReader.newInstance(encW, encH, PixelFormat.RGBA_8888, 2)
     imageReader = reader

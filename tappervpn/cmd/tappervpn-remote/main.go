@@ -6,7 +6,6 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -38,7 +37,7 @@ func dialUpgrade(ctx context.Context, url string) (io.ReadWriteCloser, error) {
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		resp.Body.Close()
-		return nil, fmt.Errorf("daemon returned %s: %s", resp.Status, strings.TrimSpace(string(b)))
+		return nil, &statusError{code: resp.StatusCode, msg: strings.TrimSpace(string(b))}
 	}
 	rwc, ok := resp.Body.(io.ReadWriteCloser)
 	if !ok {
@@ -96,9 +95,18 @@ func connectAndServe(ctx context.Context, p Platform, logf func(string, ...any))
 	return runHostHelper(ctx, conn, lw, p, logf)
 }
 
-type statusError struct{ code int }
+// statusError is a non-101 answer from the daemon, with its message.
+type statusError struct {
+	code int
+	msg  string
+}
 
-func (e *statusError) Error() string { return "daemon returned HTTP " + itoa(e.code) }
+func (e *statusError) Error() string {
+	if e.msg != "" {
+		return "daemon returned HTTP " + itoa(e.code) + ": " + e.msg
+	}
+	return "daemon returned HTTP " + itoa(e.code)
+}
 
 func itoa(n int) string {
 	if n == 0 {

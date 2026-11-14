@@ -8,6 +8,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"image"
 	"image/jpeg"
 	"sync/atomic"
@@ -117,7 +118,8 @@ func (h *windowsHost) StartCapture(ctx context.Context, codec rc.Codec, sink fun
 	defer procDeleteDC.Call(memDC)
 	bmp, _, _ := procCreateCompatibleBitmap.Call(screenDC, uintptr(w), uintptr(ht))
 	defer procDeleteObject.Call(bmp)
-	procSelectObject.Call(memDC, bmp)
+	oldBmp, _, _ := procSelectObject.Call(memDC, bmp)
+	defer procSelectObject.Call(memDC, oldBmp)
 
 	// Top-down 32bpp BGRA.
 	bi := bitmapInfoHeader{
@@ -134,18 +136,28 @@ func (h *windowsHost) StartCapture(ctx context.Context, codec rc.Codec, sink fun
 	const fps = 12
 	ticker := time.NewTicker(time.Second / fps)
 	defer ticker.Stop()
+	failures := 0
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
 		}
-		procBitBlt.Call(memDC, 0, 0, uintptr(w), uintptr(ht), screenDC, 0, 0, srcCopy)
+		blt, _, _ := procBitBlt.Call(memDC, 0, 0, uintptr(w), uintptr(ht), screenDC, 0, 0, srcCopy)
+		// GetDIBits requires the bitmap not be selected into a DC.
+		procSelectObject.Call(memDC, oldBmp)
 		r, _, _ := procGetDIBits.Call(memDC, bmp, 0, uintptr(ht),
 			uintptr(unsafe.Pointer(&buf[0])), uintptr(unsafe.Pointer(&bi)), dibRGBColors)
-		if r == 0 {
+		procSelectObject.Call(memDC, bmp)
+		if blt == 0 || r == 0 {
+			// Two seconds of failures: the desktop is locked or on a secure
+			// screen (UAC, sign-in), which a user-session process can't see.
+			if failures++; failures >= 2*fps {
+				return errors.New("its screen can't be captured right now (it may be locked or showing a security prompt)")
+			}
 			continue
 		}
+		failures = 0
 		// BGRA -> RGBA.
 		for i := 0; i < len(buf); i += 4 {
 			img.Pix[i] = buf[i+2]

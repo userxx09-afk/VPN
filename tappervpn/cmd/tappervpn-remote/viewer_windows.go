@@ -34,6 +34,11 @@ var (
 	procBeginPaint       = user32.NewProc("BeginPaint")
 	procEndPaint         = user32.NewProc("EndPaint")
 	procShowWindow       = user32.NewProc("ShowWindow")
+	procDrawTextW        = user32.NewProc("DrawTextW")
+	procFillRect         = user32.NewProc("FillRect")
+	procGetSysColorBrush = user32.NewProc("GetSysColorBrush")
+	procSetWindowTextW   = user32.NewProc("SetWindowTextW")
+	procSetBkMode        = gdi32.NewProc("SetBkMode")
 
 	procStretchDIBits = gdi32.NewProc("StretchDIBits")
 )
@@ -61,6 +66,12 @@ const (
 	srcCopyV      = 0x00CC0020
 	idcArrow      = 32512
 	colorWindow   = 5
+	colorInfoBk   = 24
+
+	dtCenter      = 0x0001
+	dtWordBreak   = 0x0010
+	dtNoPrefix    = 0x0800
+	bkTransparent = 1
 )
 
 type winViewer struct {
@@ -71,6 +82,9 @@ type winViewer struct {
 	fw, fh       int
 	hostW, hostH int
 	hwnd         uintptr
+
+	status string // shown when there's no picture, or as a banner once final
+	final  bool   // the session is over; stay open so the user can read why
 
 	input     chan rc.InputEvent
 	closeOnce sync.Once
@@ -187,11 +201,28 @@ func (v *winViewer) paint(hwnd uintptr) {
 
 	v.mu.Lock()
 	frame, fw, fh := v.frame, v.fw, v.fh
+	status, final := v.status, v.final
 	v.mu.Unlock()
+	cw, ch := v.clientSize(hwnd)
 	if frame == nil || fw == 0 || fh == 0 {
+		// No picture yet (or ever): say what's happening instead of a blank window.
+		full := rectW{0, 0, int32(cw), int32(ch)}
+		brush, _, _ := procGetSysColorBrush.Call(colorWindow)
+		procFillRect.Call(hdc, uintptr(unsafe.Pointer(&full)), brush)
+		if status != "" {
+			v.drawText(hdc, status, rectW{40, int32(ch/2 - 40), int32(cw - 40), int32(ch)})
+		}
 		return
 	}
-	cw, ch := v.clientSize(hwnd)
+	defer func() {
+		if final && status != "" {
+			// Session over: keep the last picture and put the reason on top.
+			band := rectW{0, 0, int32(cw), 60}
+			brush, _, _ := procGetSysColorBrush.Call(colorInfoBk)
+			procFillRect.Call(hdc, uintptr(unsafe.Pointer(&band)), brush)
+			v.drawText(hdc, status, rectW{20, 10, int32(cw - 20), 60})
+		}
+	}()
 	bi := bitmapInfoHeader{
 		Size:        uint32(unsafe.Sizeof(bitmapInfoHeader{})),
 		Width:       int32(fw),
@@ -205,6 +236,37 @@ func (v *winViewer) paint(hwnd uintptr) {
 		0, 0, uintptr(fw), uintptr(fh),
 		uintptr(unsafe.Pointer(&frame[0])), uintptr(unsafe.Pointer(&bi)),
 		dibRGBColorsV, srcCopyV)
+}
+
+func (v *winViewer) drawText(hdc uintptr, text string, r rectW) {
+	t, err := syscall.UTF16FromString(text)
+	if err != nil {
+		return
+	}
+	procSetBkMode.Call(hdc, bkTransparent)
+	procDrawTextW.Call(hdc, uintptr(unsafe.Pointer(&t[0])), uintptr(len(t)-1),
+		uintptr(unsafe.Pointer(&r)), dtCenter|dtWordBreak|dtNoPrefix)
+}
+
+// Status implements rc.StatusViewer.
+func (v *winViewer) Status(msg string, final bool) {
+	v.mu.Lock()
+	if v.final { // keep the first reason the session ended
+		v.mu.Unlock()
+		return
+	}
+	v.status, v.final = msg, final
+	hwnd := v.hwnd
+	v.mu.Unlock()
+	if hwnd == 0 {
+		return
+	}
+	if final {
+		if t, err := syscall.UTF16PtrFromString("TapperVPN — " + v.peerName + " — session ended"); err == nil {
+			procSetWindowTextW.Call(hwnd, uintptr(unsafe.Pointer(t)))
+		}
+	}
+	procInvalidateRect.Call(hwnd, 0, 1)
 }
 
 // --- rc.Viewer ---
@@ -230,6 +292,9 @@ func (v *winViewer) Frame(payload []byte) {
 	}
 	v.mu.Lock()
 	v.frame, v.fw, v.fh = rgba.Pix, b.Dx(), b.Dy()
+	if !v.final {
+		v.status = "" // the picture says it all
+	}
 	hwnd := v.hwnd
 	v.mu.Unlock()
 	if hwnd != 0 {
@@ -247,8 +312,12 @@ func (v *winViewer) Input() <-chan rc.InputEvent { return v.input }
 
 func (v *winViewer) Close() {
 	v.mu.Lock()
-	hwnd := v.hwnd
+	hwnd, final := v.hwnd, v.final
 	v.mu.Unlock()
+	if final {
+		// Leave the window up with the reason; the user closes it.
+		return
+	}
 	if hwnd != 0 {
 		procPostMessageW.Call(hwnd, wmClose, 0, 0)
 	}
