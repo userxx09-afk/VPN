@@ -4,6 +4,9 @@
 package com.tappervpn.ipn.remotecontrol
 
 import android.app.Activity
+import android.graphics.Paint
+import android.graphics.Color
+import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
 import android.graphics.BitmapFactory
@@ -83,6 +86,15 @@ class RemoteControlViewerActivity : Activity(), libtappervpn.RemoteControlViewer
     hostH = height
     // A PC needs a mouse, which a TV remote doesn't have: the D-pad moves a
     // pointer instead (Menu switches back to arrow keys).
+    if (hostKind == "firetv" || hostKind == "android") {
+      runOnUiThread {
+        Toast.makeText(
+                this,
+                "Remote/arrow keys move around, OK selects, touch to tap · Back to leave",
+                Toast.LENGTH_LONG)
+            .show()
+      }
+    }
     if (hostKind == "windows") {
       pointerX = width / 2
       pointerY = height / 2
@@ -91,7 +103,7 @@ class RemoteControlViewerActivity : Activity(), libtappervpn.RemoteControlViewer
         Toast.makeText(
                 this,
                 "D-pad moves the mouse · OK clicks · hold OK to right-click\n" +
-                    "Rewind/Fast-forward scroll · Menu switches to arrow keys · hold Back to exit",
+                    "Rewind/Fast-forward scroll · Menu switches to arrow keys · Back to leave",
                 Toast.LENGTH_LONG)
             .show()
       }
@@ -106,13 +118,35 @@ class RemoteControlViewerActivity : Activity(), libtappervpn.RemoteControlViewer
     val bmp = BitmapFactory.decodeByteArray(frame, 0, frame.size) ?: return
     val canvas = holder.lockCanvas() ?: run { bmp.recycle(); return }
     try {
-      canvas.drawBitmap(bmp, null, Rect(0, 0, canvas.width, canvas.height), null)
+      // Fit the whole picture without stretching it; black bars fill the rest.
+      val dst = fitRect(bmp.width, bmp.height, canvas.width, canvas.height)
+      drawRect = dst
+      canvas.drawColor(Color.BLACK)
+      canvas.drawBitmap(bmp, null, dst, paint)
     } catch (e: Exception) {
       TSLog.e(TAG, "draw: ${e.message}")
     } finally {
       holder.unlockCanvasAndPost(canvas)
       bmp.recycle()
     }
+  }
+
+  // Where the picture is drawn on the surface, for mapping touches.
+  @Volatile private var drawRect: Rect? = null
+  private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
+
+  private fun fitRect(w: Int, h: Int, cw: Int, ch: Int): Rect {
+    if (w <= 0 || h <= 0) return Rect(0, 0, cw, ch)
+    val scale = minOf(cw.toFloat() / w, ch.toFloat() / h)
+    val dw = (w * scale).toInt()
+    val dh = (h * scale).toInt()
+    val left = (cw - dw) / 2
+    val top = (ch - dh) / 2
+    return Rect(left, top, left + dw, top + dh)
+  }
+
+  override fun notice(text: String) {
+    runOnUiThread { Toast.makeText(this, text, Toast.LENGTH_LONG).show() }
   }
 
   override fun resize(width: Int, height: Int) {
@@ -133,9 +167,9 @@ class RemoteControlViewerActivity : Activity(), libtappervpn.RemoteControlViewer
   private var okLongPressed = false
 
   override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-    // Holding Back leaves the session (a short press is sent as Esc/Back).
-    if (keyCode == KeyEvent.KEYCODE_BACK && (event?.repeatCount ?: 0) > 0) {
-      finish()
+    // Back asks whether to leave, or to send Back (Esc on a PC) to the other device.
+    if (keyCode == KeyEvent.KEYCODE_BACK) {
+      if ((event?.repeatCount ?: 0) == 0) showLeaveDialog()
       return true
     }
     if (pointerKeyDown(keyCode, event)) return true
@@ -203,7 +237,27 @@ class RemoteControlViewerActivity : Activity(), libtappervpn.RemoteControlViewer
     app.sendRemoteControlInput(RC.POINTER_BUTTON, pointerX, pointerY, button, false, 0, "")
   }
 
+  private fun showLeaveDialog() {
+    AlertDialog.Builder(this)
+        .setTitle("Remote session")
+        .setItems(arrayOf("Leave the session", "Send Back to the other device", "Keep controlling")) { _, which ->
+          when (which) {
+            0 -> finish()
+            1 -> app.sendRemoteControlInput(RC.NAV, 0, 0, RC.NAV_BACK, true, 0, "")
+          }
+        }
+        .show()
+  }
+
+  // Leaving the screen (Home, another app) ends the session, so it never
+  // keeps running unseen in the background.
+  override fun onStop() {
+    super.onStop()
+    if (!isChangingConfigurations && !isFinishing) finish()
+  }
+
   override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
+    if (keyCode == KeyEvent.KEYCODE_BACK) return true
     if (pointerMode) {
       when (keyCode) {
         KeyEvent.KEYCODE_DPAD_UP,
@@ -255,10 +309,11 @@ class RemoteControlViewerActivity : Activity(), libtappervpn.RemoteControlViewer
 
   override fun onTouchEvent(event: MotionEvent?): Boolean {
     event ?: return false
-    val vw = surfaceView.width.coerceAtLeast(1)
-    val vh = surfaceView.height.coerceAtLeast(1)
-    val hx = (event.x / vw * hostW).toInt()
-    val hy = (event.y / vh * hostH).toInt()
+    val r = drawRect ?: Rect(0, 0, surfaceView.width.coerceAtLeast(1), surfaceView.height.coerceAtLeast(1))
+    val fx = ((event.x - r.left) / r.width().coerceAtLeast(1)).coerceIn(0f, 1f)
+    val fy = ((event.y - r.top) / r.height().coerceAtLeast(1)).coerceIn(0f, 1f)
+    val hx = (fx * hostW).toInt()
+    val hy = (fy * hostH).toInt()
     pointerX = hx
     pointerY = hy
     when (event.actionMasked) {

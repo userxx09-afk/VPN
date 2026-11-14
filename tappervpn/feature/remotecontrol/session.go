@@ -76,7 +76,7 @@ func RunHostSession(ctx context.Context, rw io.ReadWriter, agent HostAgent, req 
 	screen := agent.Screen()
 	if err := fc.writeControl(ControlMessage{
 		Type:   CtAccept,
-		Accept: &Accept{Version: ProtocolVersion, Codec: codec, Screen: screen, HostKind: agent.Kind()},
+		Accept: &Accept{Version: ProtocolVersion, Codec: codec, Screen: screen, HostKind: agent.Kind(), Note: viewOnlyReason(agent)},
 	}); err != nil {
 		return fmt.Errorf("sending accept: %w", err)
 	}
@@ -191,6 +191,11 @@ func RunControllerSession(ctx context.Context, rw io.ReadWriter, viewer Viewer, 
 	}
 	defer viewer.Close()
 	setViewerStatus(viewer, "Connected. Waiting for the picture…", false)
+	if msg.Accept.Note != "" {
+		if nv, ok := viewer.(NoticeViewer); ok {
+			nv.Notice(msg.Accept.Note)
+		}
+	}
 
 	// Input pump: user events from the viewer to the host.
 	go func() {
@@ -266,6 +271,25 @@ func setViewerStatus(v Viewer, msg string, final bool) {
 	if sv, ok := v.(StatusViewer); ok {
 		sv.Status(msg, final)
 	}
+}
+
+// NoticeViewer is optionally implemented by a Viewer that can keep a short
+// message visible for the whole session (see Accept.Note).
+type NoticeViewer interface {
+	Notice(msg string)
+}
+
+// ViewOnlyHost is optionally implemented by a HostAgent that can tell when it
+// can be watched but not controlled; it returns why, or "" if input works.
+type ViewOnlyHost interface {
+	ViewOnly() string
+}
+
+func viewOnlyReason(agent HostAgent) string {
+	if v, ok := agent.(ViewOnlyHost); ok {
+		return v.ViewOnly()
+	}
+	return ""
 }
 
 // CaptureErrorer is optionally implemented by a HostAgent that knows why its

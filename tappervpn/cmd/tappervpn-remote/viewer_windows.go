@@ -84,6 +84,7 @@ type winViewer struct {
 	hwnd         uintptr
 
 	status string // shown when there's no picture, or as a banner once final
+	notice string // shown as a banner for the whole session (Accept.Note)
 	final  bool   // the session is over; stay open so the user can read why
 
 	input     chan rc.InputEvent
@@ -201,7 +202,7 @@ func (v *winViewer) paint(hwnd uintptr) {
 
 	v.mu.Lock()
 	frame, fw, fh := v.frame, v.fw, v.fh
-	status, final := v.status, v.final
+	status, final, notice := v.status, v.final, v.notice
 	v.mu.Unlock()
 	cw, ch := v.clientSize(hwnd)
 	if frame == nil || fw == 0 || fh == 0 {
@@ -215,6 +216,12 @@ func (v *winViewer) paint(hwnd uintptr) {
 		return
 	}
 	defer func() {
+		if notice != "" && !final {
+			band := rectW{0, int32(ch - 44), int32(cw), int32(ch)}
+			brush, _, _ := procGetSysColorBrush.Call(colorInfoBk)
+			procFillRect.Call(hdc, uintptr(unsafe.Pointer(&band)), brush)
+			v.drawText(hdc, notice, rectW{20, int32(ch - 36), int32(cw - 20), int32(ch)})
+		}
 		if final && status != "" {
 			// Session over: keep the last picture and put the reason on top.
 			band := rectW{0, 0, int32(cw), 60}
@@ -246,6 +253,17 @@ func (v *winViewer) drawText(hdc uintptr, text string, r rectW) {
 	procSetBkMode.Call(hdc, bkTransparent)
 	procDrawTextW.Call(hdc, uintptr(unsafe.Pointer(&t[0])), uintptr(len(t)-1),
 		uintptr(unsafe.Pointer(&r)), dtCenter|dtWordBreak|dtNoPrefix)
+}
+
+// Notice implements rc.NoticeViewer.
+func (v *winViewer) Notice(msg string) {
+	v.mu.Lock()
+	v.notice = msg
+	hwnd := v.hwnd
+	v.mu.Unlock()
+	if hwnd != 0 {
+		procInvalidateRect.Call(hwnd, 0, 0)
+	}
 }
 
 // Status implements rc.StatusViewer.

@@ -55,6 +55,9 @@ type RemoteControlHost interface {
 	// hide the "being controlled by <peerName>" notification and kill switch.
 	SessionStarted(peerName string)
 	SessionEnded(peerName string)
+	// CanInject reports whether input can be applied right now (on Android
+	// this needs the TapperVPN accessibility service turned on).
+	CanInject() bool
 }
 
 // RemoteControlViewer is implemented in Kotlin for the controller side. It
@@ -63,6 +66,9 @@ type RemoteControlViewer interface {
 	Start(codec string, width int32, height int32, hostKind string) error
 	Frame(frame []byte)
 	Resize(width int32, height int32)
+	// Notice shows a message that matters for the whole session, e.g. that
+	// the other device can be watched but not controlled.
+	Notice(text string)
 	Close()
 }
 
@@ -238,6 +244,15 @@ func (h *rcHostAgent) StartCapture(ctx context.Context, codec remotecontrol.Code
 	return ch, nil
 }
 
+// ViewOnly implements remotecontrol.ViewOnlyHost.
+func (h *rcHostAgent) ViewOnly() string {
+	if h.cb.CanInject() {
+		return ""
+	}
+	return "View only for now: to control it, turn on TapperVPN in that device's " +
+		"Settings › Accessibility (it opens there after Allow)."
+}
+
 func (h *rcHostAgent) InjectInput(e remotecontrol.InputEvent) {
 	h.cb.InjectInput(int32(e.Kind), e.X, e.Y, int32(e.Button), e.Down, int32(e.Code), e.Text)
 }
@@ -269,3 +284,4 @@ func (v *rcViewer) Frame(payload []byte)                   { v.cb.Frame(payload)
 func (v *rcViewer) Resize(s remotecontrol.ScreenSize)      { v.cb.Resize(int32(s.Width), int32(s.Height)) }
 func (v *rcViewer) Input() <-chan remotecontrol.InputEvent { return v.input }
 func (v *rcViewer) Close()                                 { v.cb.Close() }
+func (v *rcViewer) Notice(msg string)                      { v.cb.Notice(msg) }

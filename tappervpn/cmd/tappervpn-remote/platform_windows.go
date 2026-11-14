@@ -212,7 +212,7 @@ func (h *windowsHost) StartCapture(ctx context.Context, codec rc.Codec, sink fun
 			img.Pix[i+3] = 255
 		}
 		var jbuf bytes.Buffer
-		if err := jpeg.Encode(&jbuf, img, &jpeg.Options{Quality: 50}); err != nil {
+		if err := jpeg.Encode(&jbuf, img, &jpeg.Options{Quality: 72}); err != nil {
 			continue
 		}
 		sink(jbuf.Bytes())

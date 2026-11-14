@@ -156,6 +156,9 @@ type Accept struct {
 	// HostKind describes the host platform ("windows", "android", "firetv") so
 	// the controller can label the viewer and tailor its input pad.
 	HostKind string `json:"hostKind,omitempty"`
+	// Note, if set, is something the controlling user should know for the
+	// whole session, e.g. that the host can be watched but not controlled.
+	Note string `json:"note,omitempty"`
 }
 
 // ScreenSize is the host screen's pixel dimensions.

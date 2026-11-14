@@ -138,6 +138,8 @@ object RemoteControlManager : libtappervpn.RemoteControlHost {
         ?: TSLog.d(TAG, "input dropped: accessibility service not enabled")
   }
 
+  override fun canInject(): Boolean = RemoteControlAccessibilityService.isEnabled()
+
   override fun sessionStarted(peerName: String) {
     currentPeerName = peerName
     RemoteControlHostService.updateControlledBy(appContext, peerName)

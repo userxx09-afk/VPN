@@ -6,7 +6,9 @@ package com.tappervpn.ipn.remotecontrol
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.graphics.Path
+import android.os.Build
 import android.os.Bundle
+import android.view.View
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.tappervpn.ipn.util.TSLog
@@ -72,22 +74,59 @@ class RemoteControlAccessibilityService : AccessibilityService() {
       RC.NAV_BACK -> performGlobalAction(GLOBAL_ACTION_BACK)
       RC.NAV_MENU -> performGlobalAction(GLOBAL_ACTION_RECENTS)
       RC.NAV_OK -> clickFocusedOrCenter()
-      RC.NAV_UP -> swipeFromCenter(0f, -SWIPE)
-      RC.NAV_DOWN -> swipeFromCenter(0f, SWIPE)
-      RC.NAV_LEFT -> swipeFromCenter(-SWIPE, 0f)
-      RC.NAV_RIGHT -> swipeFromCenter(SWIPE, 0f)
+      RC.NAV_UP -> moveFocus(View.FOCUS_UP, 0f, -SWIPE)
+      RC.NAV_DOWN -> moveFocus(View.FOCUS_DOWN, 0f, SWIPE)
+      RC.NAV_LEFT -> moveFocus(View.FOCUS_LEFT, -SWIPE, 0f)
+      RC.NAV_RIGHT -> moveFocus(View.FOCUS_RIGHT, SWIPE, 0f)
       RC.NAV_PLAY_PAUSE -> clickFocusedOrCenter()
     }
   }
 
-  private fun clickFocusedOrCenter() {
-    val focused = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-        ?: rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
-    if (focused != null && focused.isClickable) {
-      focused.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-    } else {
-      tap(centerX(), centerY())
+  /**
+   * D-pad navigation. TV apps move a focus highlight rather than scroll, and
+   * key injection needs system privileges, so: on Android 13+ use the real
+   * D-pad global actions; otherwise move input focus to the next view in that
+   * direction (what a D-pad press does); swipe only if nothing is focusable.
+   */
+  private fun moveFocus(direction: Int, dx: Float, dy: Float) {
+    if (Build.VERSION.SDK_INT >= 33) {
+      val action =
+          when (direction) {
+            View.FOCUS_UP -> GLOBAL_ACTION_DPAD_UP
+            View.FOCUS_DOWN -> GLOBAL_ACTION_DPAD_DOWN
+            View.FOCUS_LEFT -> GLOBAL_ACTION_DPAD_LEFT
+            else -> GLOBAL_ACTION_DPAD_RIGHT
+          }
+      if (performGlobalAction(action)) return
     }
+    val root = rootInActiveWindow
+    val focused = root?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+    val next = focused?.focusSearch(direction)
+    if (next != null && next.performAction(AccessibilityNodeInfo.ACTION_FOCUS)) return
+    if (focused == null && root != null) {
+      // Nothing focused yet: focus the first focusable view, like a first D-pad press.
+      firstFocusable(root)?.let { if (it.performAction(AccessibilityNodeInfo.ACTION_FOCUS)) return }
+    }
+    swipeFromCenter(dx, dy)
+  }
+
+  private fun firstFocusable(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+    if (node.isFocusable && node.isVisibleToUser) return node
+    for (i in 0 until node.childCount) {
+      val child = node.getChild(i) ?: continue
+      firstFocusable(child)?.let { return it }
+    }
+    return null
+  }
+
+  private fun clickFocusedOrCenter() {
+    if (Build.VERSION.SDK_INT >= 33 && performGlobalAction(GLOBAL_ACTION_DPAD_CENTER)) return
+    var node = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+        ?: rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
+    // The focused view is often a child of the clickable item; walk up to it.
+    while (node != null && !node.isClickable) node = node.parent
+    if (node != null && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return
+    tap(centerX(), centerY())
   }
 
   private fun typeText(text: String) {
@@ -124,6 +163,9 @@ class RemoteControlAccessibilityService : AccessibilityService() {
 
   companion object {
     private const val TAG = "RemoteControlA11y"
+
+    /** Whether the user has turned this service on (control works only then). */
+    fun isEnabled(): Boolean = instance != null
     private const val SWIPE = 300f
     private const val SCROLL_STEP = 40f
 

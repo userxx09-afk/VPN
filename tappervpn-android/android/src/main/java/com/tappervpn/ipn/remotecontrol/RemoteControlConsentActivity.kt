@@ -9,6 +9,10 @@ import android.content.Intent
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
+import androidx.compose.foundation.layout.height
+import com.tappervpn.ipn.util.TSLog
+import android.widget.Toast
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -49,6 +53,7 @@ class RemoteControlConsentActivity : ComponentActivity() {
         if (result.resultCode == Activity.RESULT_OK && result.data != null) {
           RemoteControlManager.projectionResultCode = result.resultCode
           RemoteControlManager.projectionData = result.data
+          if (!RemoteControlAccessibilityService.isEnabled()) openControlSetting()
           finishWith(true)
         } else {
           finishWith(false)
@@ -84,8 +89,18 @@ class RemoteControlConsentActivity : ComponentActivity() {
                     "“$peerName” on your TapperVPN network wants to view this " +
                         "screen and control this device. This only works while you allow it.",
                 textAlign = TextAlign.Center,
-                modifier = Modifier.padding(bottom = 32.dp),
+                modifier = Modifier.padding(bottom = 16.dp),
             )
+            if (!RemoteControlAccessibilityService.isEnabled()) {
+              Text(
+                  text =
+                      "To let them control it (not just watch), turn on TapperVPN in " +
+                          "Accessibility settings. After you choose Allow, they'll open for you.",
+                  textAlign = TextAlign.Center,
+                  modifier = Modifier.padding(bottom = 16.dp),
+              )
+            }
+            Spacer(Modifier.height(16.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.Center,
@@ -110,6 +125,20 @@ class RemoteControlConsentActivity : ComponentActivity() {
     // chain MediaProjection's own permission dialog here.
     val mpm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
     projectionLauncher.launch(mpm.createScreenCaptureIntent())
+  }
+
+  /** Opens Accessibility settings so the user can turn on remote control input. */
+  private fun openControlSetting() {
+    runCatching {
+      startActivity(
+          Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+      Toast.makeText(
+              this,
+              "Turn on “TapperVPN” here so the other device can control this one",
+              Toast.LENGTH_LONG)
+          .show()
+    }
+        .onFailure { TSLog.e("RemoteControlConsent", "accessibility settings: ${it.message}") }
   }
 
   // Back button or any other dismissal is a denial.

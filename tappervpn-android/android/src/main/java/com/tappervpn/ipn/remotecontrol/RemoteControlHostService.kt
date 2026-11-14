@@ -103,7 +103,7 @@ class RemoteControlHostService : Service() {
     )
 
     val (width, height, dpi) = displayInfo()
-    val (encW, encH) = scaleToMax(width, height, 1280)
+    val (encW, encH) = scaleToMax(width, height, 1600)
 
     val reader = ImageReader.newInstance(encW, encH, PixelFormat.RGBA_8888, 2)
     imageReader = reader
@@ -146,7 +146,7 @@ class RemoteControlHostService : Service() {
           if (rowPadding == 0) bmp else Bitmap.createBitmap(bmp, 0, 0, width, height)
 
       val out = ByteArrayOutputStream()
-      cropped.compress(Bitmap.CompressFormat.JPEG, 50, out)
+      cropped.compress(Bitmap.CompressFormat.JPEG, 72, out) // sharper text
       RemoteControlManager.pushFrame(out.toByteArray())
 
       if (cropped !== bmp) cropped.recycle()
