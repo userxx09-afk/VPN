@@ -11,7 +11,10 @@
     "tag:server": ["admin@"],
     // A plain tag with no extra access: the Workstation switch swaps a device to this when
     // turned off (headscale won't let a tagged device have zero tags).
-    "tag:device": ["admin@"]
+    "tag:device": ["admin@"],
+    // "Trusted controller" switch on the dashboard: may take remote control without the
+    // Allow prompt, but only of devices whose own app has "Auto accept remote control" on.
+    "tag:remote-admin": ["admin@"]
   },
 
   // Workstations may SSH into the home server over the VPN ("tappervpn ssh claude@100.64.0.2"),

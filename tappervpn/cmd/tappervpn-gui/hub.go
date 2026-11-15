@@ -44,6 +44,7 @@ type Model struct {
 	Self       *Device    `json:"self,omitempty"`
 	Exit       *Device    `json:"exit,omitempty"` // current exit node
 	AllowLAN   bool       `json:"allowLAN"`
+	AutoAccept bool       `json:"autoAccept"` // trusted controllers skip the Allow prompt
 	Devices    []Device   `json:"devices"`
 	Health     []string   `json:"health,omitempty"`
 	Error      string     `json:"error,omitempty"` // last failed action
@@ -260,6 +261,7 @@ func (h *hub) read() Model {
 		m.AllowLAN = prefs.ExitNodeAllowLANAccess
 	}
 	m.AppRouting = h.readAppRouting(ctx)
+	m.AutoAccept = h.readAutoAccept(ctx)
 	if st.Self != nil && len(st.Self.TapperVPNIPs) > 0 {
 		d := toDevice(st.Self)
 		d.Online = st.BackendState == ipn.Running.String()
@@ -412,6 +414,49 @@ func (h *hub) RemoteControl(id tailcfg.StableNodeID) error {
 		body, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode/100 != 2 {
 			return fmt.Errorf("%s", strings.TrimSpace(string(body)))
+		}
+		return nil
+	})
+}
+
+// readAutoAccept reports this PC's "Auto accept remote control" switch.
+func (h *hub) readAutoAccept(ctx context.Context) bool {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		"http://local-tappervpnd.sock/localapi/v0/remotecontrol/autoaccept", nil)
+	if err != nil {
+		return false
+	}
+	resp, err := h.lc.DoLocalRequest(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	var st struct {
+		On bool `json:"on"`
+	}
+	return resp.StatusCode == http.StatusOK && json.NewDecoder(resp.Body).Decode(&st) == nil && st.On
+}
+
+// SetAutoAccept switches "Auto accept remote control" on or off for this PC.
+// Devices marked as trusted controllers on the Tapper Dashboard then take
+// control without the Allow prompt; everyone else is still asked.
+func (h *hub) SetAutoAccept(on bool) error {
+	return h.do("Changing auto accept", func(ctx context.Context) error {
+		body := strings.NewReader(fmt.Sprintf(`{"on":%t}`, on))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+			"http://local-tappervpnd.sock/localapi/v0/remotecontrol/autoaccept", body)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := h.lc.DoLocalRequest(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode/100 != 2 {
+			msg, _ := io.ReadAll(resp.Body)
+			return fmt.Errorf("%s", strings.TrimSpace(string(msg)))
 		}
 		return nil
 	})

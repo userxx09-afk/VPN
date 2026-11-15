@@ -173,6 +173,38 @@ object RemoteControlManager : libtappervpn.RemoteControlHost {
         "[]"
       }
 
+  // --- auto accept ---
+
+  /**
+   * Whether this device lets dashboard-trusted controllers in without the Allow
+   * prompt. Blocking — call off the main thread. False on error.
+   */
+  fun getAutoAccept(): Boolean =
+      try {
+        val resp = app.callLocalAPI(5_000, "GET", "/localapi/v0/remotecontrol/autoaccept", null)
+        (resp.bodyBytes() ?: ByteArray(0)).decodeToString().contains("\"on\":true")
+      } catch (e: Exception) {
+        TSLog.e(TAG, "getAutoAccept failed: ${e.message}")
+        false
+      }
+
+  /** Switches auto accept on or off; returns the saved value. Blocking. */
+  fun setAutoAccept(on: Boolean): Boolean =
+      try {
+        val body = "{\"on\":$on}".toByteArray()
+        val resp =
+            app.callLocalAPI(
+                5_000,
+                "POST",
+                "/localapi/v0/remotecontrol/autoaccept",
+                com.tappervpn.ipn.ui.util.InputStreamAdapter(body.inputStream()),
+            )
+        (resp.bodyBytes() ?: ByteArray(0)).decodeToString().contains("\"on\":true")
+      } catch (e: Exception) {
+        TSLog.e(TAG, "setAutoAccept failed: ${e.message}")
+        !on
+      }
+
   private fun screenSize(): Pair<Int, Int> {
     val wm = appContext.getSystemService(Context.WINDOW_SERVICE) as WindowManager
     return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {

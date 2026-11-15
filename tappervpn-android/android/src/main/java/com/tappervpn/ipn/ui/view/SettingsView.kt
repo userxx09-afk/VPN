@@ -18,6 +18,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -41,6 +42,7 @@ import com.tappervpn.ipn.R
 import com.tappervpn.ipn.mdm.AlwaysNeverUserDecides
 import com.tappervpn.ipn.mdm.MDMSettings
 import com.tappervpn.ipn.mdm.ShowHide
+import com.tappervpn.ipn.remotecontrol.RemoteControlManager
 import com.tappervpn.ipn.ui.Links
 import com.tappervpn.ipn.ui.theme.link
 import com.tappervpn.ipn.ui.theme.listItem
@@ -51,7 +53,9 @@ import com.tappervpn.ipn.ui.util.set
 import com.tappervpn.ipn.ui.viewModel.AppViewModel
 import com.tappervpn.ipn.ui.viewModel.SettingsNav
 import com.tappervpn.ipn.ui.viewModel.SettingsViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 fun SettingsView(
@@ -132,6 +136,9 @@ fun SettingsView(
         Lists.ItemDivider()
         Setting.Text(R.string.subnet_routing, onClick = settingsNav.onNavigateToSubnetRouting)
       }
+
+      Lists.ItemDivider()
+      RemoteControlAutoAcceptSetting()
 
       Lists.ItemDivider()
       Setting.Switch(
@@ -330,6 +337,32 @@ object Setting {
         },
     )
   }
+}
+
+/**
+ * "Auto accept remote control": with this on, a device marked as a trusted
+ * controller on the Tapper Dashboard can take control without the Allow prompt.
+ * Both are needed; either one off brings the prompt back.
+ */
+@Composable
+fun RemoteControlAutoAcceptSetting() {
+  var on by remember { mutableStateOf(false) }
+  var loaded by remember { mutableStateOf(false) }
+  val scope = rememberCoroutineScope()
+  LaunchedEffect(Unit) {
+    on = withContext(Dispatchers.IO) { RemoteControlManager.getAutoAccept() }
+    loaded = true
+  }
+  Setting.Switch(
+      R.string.remote_control_auto_accept,
+      subtitle = stringResource(R.string.remote_control_auto_accept_subtitle),
+      isOn = on,
+      enabled = loaded,
+      onToggle = { want ->
+        on = want
+        scope.launch { on = withContext(Dispatchers.IO) { RemoteControlManager.setAutoAccept(want) } }
+      },
+  )
 }
 
 @Composable

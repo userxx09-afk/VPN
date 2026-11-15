@@ -25,6 +25,7 @@ func init() {
 	localapi.Register("remotecontrol/connect", serveConnect)
 	localapi.Register("remotecontrol/agent", serveAgent)
 	localapi.Register("remotecontrol/dial", serveDial)
+	localapi.Register("remotecontrol/autoaccept", serveAutoAccept)
 }
 
 // Extension is the per-LocalBackend remote-control extension. It holds no
@@ -33,11 +34,12 @@ func init() {
 // can reach the node's peer list and PeerAPI dialer via ipnext.Host.
 type Extension struct {
 	logf logger.Logf
+	sb   ipnext.SafeBackend
 	host ipnext.Host
 }
 
 func newExtension(logf logger.Logf, b ipnext.SafeBackend) (ipnext.Extension, error) {
-	return &Extension{logf: logger.WithPrefix(logf, "remotecontrol: ")}, nil
+	return &Extension{logf: logger.WithPrefix(logf, "remotecontrol: "), sb: b}, nil
 }
 
 func (e *Extension) Name() string { return "remotecontrol" }

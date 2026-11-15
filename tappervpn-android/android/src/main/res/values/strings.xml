@@ -431,4 +431,6 @@
     <string name="remote_control_a11y_description">Lets a device you approve on your TapperVPN network control this device (taps, swipes, text, and Home/Back) while a remote-control session is active. Raw D-pad keys into other apps are not available without this.</string>
     <string name="remote_control_device">Control this device</string>
     <string name="remote_control_device_desc">View its screen and control it (it must accept)</string>
+    <string name="remote_control_auto_accept">Auto accept remote control</string>
+    <string name="remote_control_auto_accept_subtitle">Devices marked as trusted controllers on the Tapper Dashboard can take control without asking. Others still have to be allowed.</string>
 </resources>

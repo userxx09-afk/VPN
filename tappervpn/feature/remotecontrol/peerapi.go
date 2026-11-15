@@ -16,7 +16,9 @@ import (
 //
 // The flow enforces the core requirement — no control without acceptance:
 //  1. If this node has no host agent, control is simply unavailable.
-//  2. Otherwise the user is prompted (unless this peer was remembered), and a
+//  2. Otherwise the user is prompted - unless this device switched on auto
+//     accept and the caller is a dashboard-marked trusted controller (see
+//     autoaccept.go), or the peer was remembered - and a
 //     denial or timeout returns 403 before any stream is established.
 //  3. Only on acceptance is the response opened and the session run.
 func handleConnect(h ipnlocal.PeerAPIHandler, w http.ResponseWriter, r *http.Request) {
@@ -36,7 +38,13 @@ func handleConnect(h ipnlocal.PeerAPIHandler, w http.ResponseWriter, r *http.Req
 		PeerID:   string(peer.StableID()),
 	}
 
-	if !isRemembered(req.PeerID) {
+	optedIn := false
+	if ext, ok := ipnlocal.GetExt[*Extension](h.LocalBackend()); ok {
+		optedIn = ext.AutoAccept()
+	}
+	if shouldAutoAccept(optedIn, peer) {
+		h.Logf("remotecontrol: auto-accepted control request from trusted controller %q", req.PeerName)
+	} else if !isRemembered(req.PeerID) {
 		ctx, cancel := context.WithTimeout(r.Context(), consentTimeout)
 		decision := agent.RequestConsent(ctx, req)
 		cancel()

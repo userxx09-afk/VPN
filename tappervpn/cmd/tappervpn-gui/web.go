@@ -109,6 +109,8 @@ func (s *webServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		err = h.SetExitNode(tailcfg.StableNodeID(req.ID))
 	case "/api/allow-lan":
 		err = h.SetAllowLAN(req.On)
+	case "/api/auto-accept":
+		err = h.SetAutoAccept(req.On)
 	case "/api/remote-control":
 		err = h.RemoteControl(tailcfg.StableNodeID(req.ID))
 	case "/api/app-routing":
