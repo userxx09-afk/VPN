@@ -4,7 +4,7 @@
 Every few seconds it records, for every device on the VPN:
   - online or not, and the path to it: direct (ip:port) or through a relay (DERP)
   - round-trip time (tappervpn ping), how much it's sending and receiving right now
-  - the app version it reports (from this server's netmap, once a minute)
+  - the app version it reports (from headscale's database, once a minute)
   - its open connections through this server: to the internet when it uses the
     server as exit node, or to the server's own apps (from the kernel's
     connection tracker); "no reply" ones are blocked or unreachable
@@ -20,6 +20,7 @@ import json
 import os
 import re
 import socket
+import sqlite3
 import subprocess
 import threading
 import time
@@ -127,17 +128,41 @@ def peers():
     return self_ips, res
 
 
+HEADSCALE_DB = "/var/lib/headscale/db.sqlite"
+
+
 def versions():
     """App version each device reports to the control server (its Hostinfo), keyed by VPN IPv4.
 
-    Read from this server's own netmap, which carries every device's Hostinfo, including
-    devices that are offline right now (they keep their last report).
+    Read from headscale's database, which stores each device's latest report, including
+    devices that are offline right now. (This server's own netmap isn't used: headscale
+    doesn't pass a peer's new Hostinfo on to other devices, so it keeps the version each
+    device had when this server's VPN last restarted.) Falls back to the netmap if the
+    database can't be read.
     """
+    res = {}
+    try:
+        db = sqlite3.connect(f"file:{HEADSCALE_DB}?mode=ro", uri=True, timeout=5)
+        try:
+            rows = db.execute("SELECT ipv4, host_info FROM nodes WHERE deleted_at IS NULL").fetchall()
+        finally:
+            db.close()
+        for v4, hi in rows:
+            try:
+                h = json.loads(hi or "{}") or {}
+            except ValueError:
+                h = {}
+            if v4:
+                res[v4] = {"version": h.get("IPNVersion") or "", "os": h.get("OS") or "",
+                           "osVersion": h.get("OSVersion") or "", "model": h.get("DeviceModel") or ""}
+        if res:
+            return res
+    except sqlite3.Error:
+        pass
     try:
         d = json.loads(run(["tappervpn", "debug", "netmap"]))
     except ValueError:
         return None
-    res = {}
     for n in [d.get("SelfNode") or {}] + (d.get("Peers") or []):
         v4 = next((a.split("/")[0] for a in n.get("Addresses") or [] if "." in a), "")
         h = n.get("Hostinfo") or {}
