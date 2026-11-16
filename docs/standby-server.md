@@ -44,17 +44,37 @@ in Hyper-V on fm-workstation** (Fort Madison).
 6. **Relay**: the standby also runs a relay, added to the relay map as a
    second region, so devices use whichever is up even before failover.
    Needs UDP 3478 forwarded at Fort Madison too.
-7. **Exit node**: the VM offers itself as an exit node; routers that send all
-   traffic through tapper fall back to it (router `update`/watchdog change).
+7. **Exit nodes, configurable per device**: each device gets an ordered exit
+   list, set on the dashboard. Default: tapper (Chicago), then the standby
+   (Fort Madison) when Chicago has a network problem. Any device can be set
+   to prefer another exit, e.g. ch-workstation first. The app (and the
+   routers) move to the next exit in its list when the current one stops
+   answering, and back when it returns.
 8. **Dashboard**: shows the standby's state (copy age, which server is in
    charge) and has the "hand back to tapper" button.
 
+## DNS and ports (tapper.co is on Cloudflare)
+
+The VPN's control traffic and relay can't go through Cloudflare's proxy or a
+Cloudflare Tunnel (the relay needs UDP 3478 and a raw connection), which is
+why `vp.tapper.co` is a **DNS only** record to Chicago's public IP with 443
+forwarded. The standby works the same way:
+
+- Cloudflare: add `A vp2` → Fort Madison's public IP, **Proxy status: DNS
+  only** (grey cloud). Nothing changes at GoDaddy (it only points at
+  Cloudflare's nameservers).
+- If Fort Madison's public IP can change: a Cloudflare API token limited to
+  *Zone → DNS → Edit* for tapper.co, used by the VM to keep `vp2` current.
+  The token goes in the private repo.
+- Fort Madison router: forward TCP 443 and UDP 3478 to the VM.
+- Dashboard and BCN stay on the Cloudflare Tunnel as they are.
+
 ## Needed from you
 
-- Admin approval on fm-workstation to turn on Hyper-V (one reboot).
-- On the Fort Madison router: forward TCP 443 and UDP 3478 to the VM.
-- A DNS record `vp2.tapper.co` → Fort Madison's public IP (GoDaddy).
-- The Fort Madison public IP is static, or we add a dynamic-DNS updater.
+- Approve the Hyper-V prompt on fm-workstation (Hyper-V is already on; no
+  reboot needed).
+- The Cloudflare record (and token if the IP is dynamic) and the two port
+  forwards above, once the VM has its LAN address.
 
 ## Build order
 
