@@ -16,7 +16,8 @@ in Hyper-V on fm-workstation** (Fort Madison).
 
 ## How it fits together
 
-1. **VM**: `tapper-standby` on fm-workstation. Ubuntu Server 24.04, 2 vCPU,
+1. **VM**: `tapper-standby` on fm-workstation (LAN 192.168.5.215 by DHCP,
+   eero reservation added by hand; VPN 100.64.0.11; exit node). Ubuntu Server 24.04, 2 vCPU,
    4 GB RAM, 40 GB disk, external switch so it gets its own LAN address.
    fm-workstation has 16 GB RAM, 14 threads and ~140 GB free, so this fits.
    Hyper-V needs turning on once (admin + one reboot of fm-workstation).
@@ -45,9 +46,12 @@ in Hyper-V on fm-workstation** (Fort Madison).
    second region, so devices use whichever is up even before failover.
    Needs UDP 3478 forwarded at Fort Madison too.
 7. **Exit nodes, configurable per device**: each device gets an ordered exit
-   list, set on the dashboard. Default: tapper (Chicago), then the standby
-   (Fort Madison) when Chicago has a network problem. Any device can be set
-   to prefer another exit, e.g. ch-workstation first. The app (and the
+   list, set on the dashboard. Default: tapper, then ch-workstation, then
+   tapper-standby. Any device can have its own order. Built in 0.2.25:
+   `ipn/ipnlocal/exitorder.go` (devices ping their exit nodes themselves; ~1
+   minute of silence moves them down the list) and the dashboard's
+   "Exit-node failover" card, which writes the order into the policy's
+   nodeAttrs. The app (and the
    routers) move to the next exit in its list when the current one stops
    answering, and back when it returns.
 8. **Dashboard**: shows the standby's state (copy age, which server is in
