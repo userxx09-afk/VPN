@@ -28,6 +28,10 @@ jobs:
           go vet ./feature/remotecontrol/...
           go test ./feature/remotecontrol/...
 
+      - name: Test exit-node failover order
+        working-directory: tappervpn
+        run: go test ./ipn/ipnlocal/ -run 'ParseExitOrder|PickOrderedExit|ExitOrderManaged' -count=1
+
       - name: Build client (Linux)
         working-directory: tappervpn
         run: go build ./cmd/tappervpnd ./cmd/tappervpn

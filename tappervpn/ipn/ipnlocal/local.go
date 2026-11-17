@@ -440,6 +440,10 @@ type LocalBackend struct {
 	// refreshAutoExitNode indicates if the exit node should be recomputed when the next netcheck report is available.
 	refreshAutoExitNode bool // guarded by mu
 
+	// exitHealth is the exit-order watcher's view of the listed exit nodes
+	// (see exitorder.go). guarded by mu
+	exitHealth map[tailcfg.StableNodeID]*exitHealth
+
 	// overrideAlwaysOn is whether [pkey.AlwaysOn] is overridden by the user
 	// and should have no impact on the WantRunning state until the policy changes,
 	// or the user re-connects manually, switches to a different profile, etc.
@@ -3079,6 +3083,9 @@ func (b *LocalBackend) controlDebugFlags() []string {
 // from the following whether or not that is a safe transition).
 func (b *LocalBackend) Start(opts ipn.Options) error {
 	defer b.CheckDeadlocks()()
+	if buildfeatures.HasUseExitNode {
+		b.startExitOrderWatcher()
+	}
 
 	// Shut down the previous control client, if any, before starting a
 	// new one, so the old client can't race with the new one. Without
@@ -7403,6 +7410,10 @@ func (b *LocalBackend) resolveExitNodeInPrefsLocked(prefs *ipn.Prefs) (changed b
 		changed = true
 	}
 	if b.resolveExitNodeIPLocked(prefs) {
+		changed = true
+	}
+	// After the IP is resolved to an ID, so an exit node picked by IP counts too.
+	if b.resolveOrderedExitNodeLocked(prefs) {
 		changed = true
 	}
 	return changed
