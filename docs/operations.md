@@ -170,6 +170,12 @@ file in the repo). Devices pick a release up within a day.
 
 ## Still to do
 
+- **On ch-workstation (Chicago), next time you're there:** in PowerShell as
+  administrator, run
+  `& "C:\Program Files\TapperVPN\tappervpn.exe" set --advertise-exit-node`
+  so it becomes the 2nd exit node in the failover order (tapper,
+  ch-workstation, tapper-standby). The policy approves it automatically.
+
 - vp.tapper.co: DNS A record to the home public IP, port forward TCP 443
   (and UDP 41641) to tapper, HTTPS on headscale, then `server_url`.
 - headscale shouldn't die when it can't download the relay map: keep a
