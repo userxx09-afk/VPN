@@ -1,0 +1,54 @@
+# XcodeGen spec: `xcodegen generate` writes TapperVPN.xcodeproj (not in git).
+# build.sh does that, after building Frameworks/Libtappervpn.xcframework.
+name: TapperVPN
+options:
+  bundleIdPrefix: com.tappervpn
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    # Overridden by build.sh / CI from the repo's VERSION and the run number.
+    MARKETING_VERSION: "0.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    # Your Apple Developer team (10 characters); CI passes APPLE_TEAM_ID.
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.0"
+    APP_BUNDLE_ID: com.tappervpn.ipn
+    APP_GROUP: group.com.tappervpn.ipn
+    ENABLE_BITCODE: NO
+targets:
+  TapperVPN:
+    type: application
+    platform: iOS
+    sources: [App, Shared]
+    settings:
+      base:
+        PRODUCT_NAME: TapperVPN
+        PRODUCT_BUNDLE_IDENTIFIER: $(APP_BUNDLE_ID)
+        TARGETED_DEVICE_FAMILY: "1,2"
+        INFOPLIST_FILE: App/Info.plist
+        CODE_SIGN_ENTITLEMENTS: App/TapperVPN.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+    dependencies:
+      - target: PacketTunnel
+      - sdk: NetworkExtension.framework
+  PacketTunnel:
+    type: app-extension
+    platform: iOS
+    sources: [PacketTunnel, Shared]
+    settings:
+      base:
+        PRODUCT_NAME: PacketTunnel
+        PRODUCT_BUNDLE_IDENTIFIER: $(APP_BUNDLE_ID).network-extension
+        TARGETED_DEVICE_FAMILY: "1,2"
+        INFOPLIST_FILE: PacketTunnel/Info.plist
+        CODE_SIGN_ENTITLEMENTS: PacketTunnel/PacketTunnel.entitlements
+        APPLICATION_EXTENSION_API_ONLY: YES
+    dependencies:
+      - framework: Frameworks/Libtappervpn.xcframework
+        embed: false
+      - sdk: NetworkExtension.framework
+      - sdk: libresolv.tbd
