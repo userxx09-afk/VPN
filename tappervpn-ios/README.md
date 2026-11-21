@@ -66,6 +66,11 @@ membership ($99/year; a free account can't sign VPN extensions).
 One-time setup:
 
 1. Join the Apple Developer Program as an individual or organization.
+   **Already have one (for example for Tapper IPTV)? Use it**: same account,
+   same Team ID, and its App Store Connect API key if that key has the Admin
+   role. You don't need its distribution certificate or profiles: the
+   workflow uses Xcode's automatic (cloud) signing, which makes its own.
+   What's new for TapperVPN is only steps 2 and 4.
 2. In [App Store Connect](https://appstoreconnect.apple.com) > Apps, add a new
    iOS app with bundle ID `com.tappervpn.ipn` (register it under
    Certificates, Identifiers & Profiles > Identifiers first, with the
