@@ -1,0 +1,104 @@
+name: iOS
+
+# Builds the iPad/iPhone app (tappervpn-ios/) on a Mac runner.
+#
+#   - Every push / PR touching the app or the client: unsigned build, kept as
+#     the artifact tappervpn-ios-unsigned (proves it compiles; it can't be
+#     installed as is, iOS only runs signed apps).
+#   - Actions > iOS > Run workflow with "testflight" ticked, or a push to main
+#     that changes VERSION: signed build uploaded to TestFlight. Needs the
+#     repository secrets APPLE_TEAM_ID, ASC_KEY_ID, ASC_ISSUER_ID and
+#     ASC_KEY_P8 (see tappervpn-ios/README.md); skipped while they're missing.
+
+on:
+  push:
+    paths:
+      - VERSION
+      - tappervpn-ios/**
+      - tappervpn/**
+      - .github/workflows/ios.yml
+  pull_request:
+    paths:
+      - tappervpn-ios/**
+      - tappervpn/**
+      - .github/workflows/ios.yml
+  workflow_dispatch:
+    inputs:
+      testflight:
+        description: Sign and upload to TestFlight
+        type: boolean
+        default: false
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: iOS app
+    runs-on: macos-15
+    env:
+      HAS_ASC: ${{ secrets.ASC_KEY_P8 != '' && secrets.APPLE_TEAM_ID != '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Upload to TestFlight this time?
+        id: tf
+        env:
+          BEFORE: ${{ github.event.before }}
+          WANT: ${{ inputs.testflight }}
+        run: |
+          up=false
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && [ "$WANT" = true ]; then up=true; fi
+          if [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF" = refs/heads/main ] &&
+             git diff --name-only "$BEFORE" HEAD 2>/dev/null | grep -qx VERSION; then up=true; fi
+          if [ "$up" = true ] && [ "$HAS_ASC" != true ]; then
+            echo "::warning::TestFlight upload skipped: the App Store Connect secrets aren't set (see tappervpn-ios/README.md)"
+            up=false
+          fi
+          echo "upload=$up" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tappervpn-ios/go.mod
+          cache-dependency-path: tappervpn-ios/go.sum
+
+      - name: Tools
+        run: |
+          brew install xcodegen
+          xcodebuild -version
+
+      - name: Go tests
+        working-directory: tappervpn-ios
+        run: go test ./libtappervpn/
+
+      - name: Unsigned build
+        working-directory: tappervpn-ios
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: ./build.sh unsigned
+
+      - name: Upload unsigned app
+        uses: actions/upload-artifact@v4
+        continue-on-error: true  # storage quota full must not fail the build
+        with:
+          name: tappervpn-ios-unsigned
+          path: tappervpn-ios/build/TapperVPN-unsigned.ipa
+          if-no-files-found: error
+
+      - name: TestFlight
+        if: steps.tf.outputs.upload == 'true'
+        working-directory: tappervpn-ios
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          BUILD_NUMBER: ${{ github.run_number }}${{ github.run_attempt }}
+          REUSE_FRAMEWORK: "1"  # built by the step above
+        run: |
+          export ASC_KEY_PATH="$RUNNER_TEMP/asc.p8"
+          printf '%s' "$ASC_KEY_P8" > "$ASC_KEY_PATH"
+          ./build.sh testflight

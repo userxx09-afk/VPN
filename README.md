@@ -12,6 +12,7 @@ Everything needed to build and release TapperVPN is in this repo:
 | `tappervpn/` | Client: daemon `tappervpnd`, CLI `tappervpn`, our updater (`updater/`, `cmd/tappervpn-updater`, `cmd/tappervpn-release`) | Tailscale (BSD-3) |
 | `headscale/` | Control server | Headscale (BSD-3) |
 | `tappervpn-android/` | Android and Fire TV app (`com.tappervpn.ipn`) | tailscale-android (BSD-3) |
+| `tappervpn-ios/` | iPad and iPhone app (SwiftUI + packet tunnel), see [its README](tappervpn-ios/README.md) | ours, on the client above |
 | `glinet/` | Package for GL.iNet / OpenWrt routers | ours |
 | `server/` | Server config, policy, `install.sh` for the Ubuntu server | ours |
 | `scripts/` | Build, install, release and rebrand scripts | ours |
@@ -32,6 +33,7 @@ is `com.tappervpn.ipn`. "Tailscale" still appears in the copyright notices
 | Release signing key | `%USERPROFILE%\.tappervpn\release.key` | Whoever has it can push updates to every device |
 | Android signing key | `%USERPROFILE%\.android\debug.keystore` | Android only accepts updates signed with the same key |
 | Toolchains: Go, JDK 17, Android SDK/NDK | Download (see below) | Several GB |
+| iOS: App Store Connect API key (`.p8`), Team ID | Repository secrets `ASC_KEY_P8`, `ASC_KEY_ID`, `ASC_ISSUER_ID`, `APPLE_TEAM_ID`, and the private store | Whoever has it can publish builds of the app |
 
 **Back up the two signing keys.** If the release key is lost, devices refuse
 new updates and must be reinstalled by hand. If the Android key is lost,
@@ -158,7 +160,9 @@ installed one.
 1. **Own UI**: the Windows app (`cmd/tappervpn-gui`) does sign-in, connect,
    exit node, per-app routing and devices.
 2. **macOS**: `NETransparentProxyProvider` system extension.
-3. **iOS**: full-tunnel or domain-based only. Per-app VPN needs MDM; iOS cannot be a gateway.
+3. **iOS / iPadOS**: first version in `tappervpn-ios/` (sign in, connect, exit
+   node, devices). Installs through TestFlight once the Apple Developer
+   secrets are set. Per-app VPN needs MDM; iOS cannot be a gateway.
 4. **Logo in the web client**: its icons come from Tailscale's prebuilt web UI package; building our own web UI would let it use the TapperVPN logo too.
 
 ## Known quirks
