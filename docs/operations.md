@@ -168,13 +168,41 @@ file in the repo). Devices pick a release up within a day.
 | mkversion failed in the monorepo | It expects its own git repo | `build-android.ps1` passes `TS_VERSION_LONG` / `TS_VERSION_GIT_HASH` |
 | `tappervpn update` would install official Tailscale | Upstream's `clientupdate` | Disabled; our updater is `tappervpn-updater` |
 
+## Claude sessions from the phone on a workstation
+
+So a Claude chat on the phone can work on a PC's files (as on fm-workstation),
+the PC must be running the Claude desktop app, signed in, with the folders
+added. To keep it available all the time:
+
+1. Install the Claude desktop app on the PC and sign in with the same account
+   as the phone.
+2. In a chat in the desktop app, use **+ > Add folder** for each folder the
+   phone sessions should reach (e.g. the repo folders).
+3. Start it at sign-in: **Settings > Apps > Startup**, turn **Claude** on.
+4. Never sleep: **Settings > System > Power** (Windows 11: Power & battery >
+   Screen, sleep & hibernate timeouts), set **sleep when plugged in** to
+   **Never**. The screen can still turn off.
+5. Survive restarts (Windows Update): the app only runs while someone is
+   signed in to Windows. Either sign in again after a restart, or turn on
+   automatic sign-in for that account (`netplwiz`, untick "Users must enter a
+   user name and password", if the option is offered). Set **Windows Update >
+   Advanced options > Active hours** so restarts happen at night.
+6. Leave the app open (closing its window to the tray is fine; Quit is not).
+
+Check from the phone: start a chat, ask it to list one of the added folders.
+If it says the computer can't be reached, the PC is asleep, off, offline, or
+the app isn't running.
+
 ## Still to do
 
-- **On ch-workstation (Chicago), next time you're there:** in PowerShell as
-  administrator, run
-  `& "C:\Program Files\TapperVPN\tappervpn.exe" set --advertise-exit-node`
-  so it becomes the 2nd exit node in the failover order (tapper,
-  ch-workstation, tapper-standby). The policy approves it automatically.
+- **On ch-workstation (Chicago), next time you're there:**
+  - Make it an exit node: TapperVPN app > Exit node > **Offer this PC as an
+    exit node** (0.2.26+), or in PowerShell as administrator
+    `& "C:\Program Files\TapperVPN\tappervpn.exe" set --advertise-exit-node`.
+    It becomes the 2nd exit node in the failover order (tapper,
+    ch-workstation, tapper-standby). The policy approves it automatically.
+  - Set it up for Claude sessions from the phone, always on: see
+    "Claude sessions from the phone on a workstation" above.
 
 - vp.tapper.co: DNS A record to the home public IP, port forward TCP 443
   (and UDP 41641) to tapper, HTTPS on headscale, then `server_url`.
