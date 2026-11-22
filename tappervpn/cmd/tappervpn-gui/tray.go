@@ -169,8 +169,11 @@ func (t *tray) build(ctx context.Context, m Model) {
 	url := m.AdminURL
 	onClick(ctx, admin, func() { webbrowser.Open(url) })
 	systray.AddSeparator()
-	quit := systray.AddMenuItem("Quit", "Close the app (the VPN keeps running)")
-	onClick(ctx, quit, systray.Quit)
+	quit := systray.AddMenuItem("Quit", "Close the app and its window (the VPN keeps running)")
+	onClick(ctx, quit, func() {
+		closeWindow()
+		systray.Quit()
+	})
 }
 
 func onClick(ctx context.Context, it *systray.MenuItem, fn func()) {

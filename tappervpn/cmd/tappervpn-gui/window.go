@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 	"unsafe"
 
 	"github.com/toqueteos/webbrowser"
@@ -25,10 +26,25 @@ var (
 	procSetForeground = user32.NewProc("SetForegroundWindow")
 	procShowWindow    = user32.NewProc("ShowWindow")
 	procIsIconic      = user32.NewProc("IsIconic")
+	procPostMessage   = user32.NewProc("PostMessageW")
 	chromeWindowClass = windows.StringToUTF16Ptr("Chrome_WidgetWin_1")
 	windowTitleUTF16  = windows.StringToUTF16Ptr(windowTitle)
 	swRestore         = uintptr(9)
+	wmClose           = uintptr(0x0010)
 )
+
+// closeWindow closes the TapperVPN window if it's open, so quitting from the
+// tray doesn't leave a window behind that can no longer do anything.
+func closeWindow() {
+	for i := 0; i < 5; i++ { // more than one may be open
+		hwnd, _, _ := procFindWindow.Call(uintptr(unsafe.Pointer(chromeWindowClass)), uintptr(unsafe.Pointer(windowTitleUTF16)))
+		if hwnd == 0 {
+			return
+		}
+		procPostMessage.Call(hwnd, wmClose, 0, 0)
+		time.Sleep(200 * time.Millisecond)
+	}
+}
 
 // openWindow shows the TapperVPN window: brings it to the front if it's
 // open, else opens the page as an Edge app window (no tabs or address bar),
