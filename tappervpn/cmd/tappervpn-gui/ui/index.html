@@ -228,6 +228,9 @@ function exitCard() {
   rows.push(`<div class="row"><div class="grow"><div class="name" style="font-weight:500">Allow local network access</div>
       <div class="meta">Reach printers and other LAN devices while using an exit node</div></div>
       <label class="sw sm"><input type="checkbox" id="lan" ${m.allowLAN ? "checked" : ""}><span></span></label></div>`);
+  rows.push(`<div class="row"><div class="grow"><div class="name" style="font-weight:500">Offer this PC as an exit node</div>
+      <div class="meta" style="white-space:normal">Other devices can send their internet traffic through this PC${m.offerExit ? ". This PC can't use an exit node while it is one." : ""}</div></div>
+      <label class="sw sm"><input type="checkbox" id="offerexit" ${m.offerExit ? "checked" : ""} ${m.busy ? "disabled" : ""}><span></span></label></div>`);
   return `<section class="card"><h2>Exit node</h2>${rows.join("")}</section>`;
 }
 
@@ -340,6 +343,10 @@ document.addEventListener("click", async (e) => {
 });
 document.addEventListener("change", (e) => {
   if (e.target.id === "power") api("running", {on: e.target.checked});
+  if (e.target.id === "offerexit") {
+    if (e.target.checked && m.exit && !confirm("This PC is using " + m.exit.name + " as its exit node. Being an exit node turns that off. Continue?")) { e.target.checked = false; return; }
+    api("offer-exit", {on: e.target.checked});
+  }
   if (e.target.id === "lan") api("allow-lan", {on: e.target.checked});
   if (e.target.id === "autoaccept") api("auto-accept", {on: e.target.checked});
 });

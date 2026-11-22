@@ -44,6 +44,7 @@ type Model struct {
 	Self       *Device    `json:"self,omitempty"`
 	Exit       *Device    `json:"exit,omitempty"` // current exit node
 	AllowLAN   bool       `json:"allowLAN"`
+	OfferExit  bool       `json:"offerExit"`  // this PC offers itself as an exit node
 	AutoAccept bool       `json:"autoAccept"` // trusted controllers skip the Allow prompt
 	Devices    []Device   `json:"devices"`
 	Health     []string   `json:"health,omitempty"`
@@ -259,6 +260,7 @@ func (h *hub) read() Model {
 	if prefs, err := h.lc.GetPrefs(ctx); err == nil {
 		m.ControlURL = prefs.ControlURL
 		m.AllowLAN = prefs.ExitNodeAllowLANAccess
+		m.OfferExit = prefs.AdvertisesExitNode()
 	}
 	m.AppRouting = h.readAppRouting(ctx)
 	m.AutoAccept = h.readAutoAccept(ctx)
@@ -388,6 +390,36 @@ func (h *hub) SetAllowLAN(on bool) error {
 			Prefs:                     ipn.Prefs{ExitNodeAllowLANAccess: on},
 			ExitNodeAllowLANAccessSet: true,
 		})
+		return err
+	})
+}
+
+// SetOfferExit makes this PC offer itself as an exit node for other devices
+// (like `tappervpn set --advertise-exit-node`), or stops offering. A device
+// can't use an exit node while it is one, so turning this on also clears
+// this PC's own exit node. The server approves it automatically.
+func (h *hub) SetOfferExit(on bool) error {
+	what := "Stopping being an exit node"
+	if on {
+		what = "Becoming an exit node"
+	}
+	return h.do(what, func(ctx context.Context) error {
+		prefs, err := h.lc.GetPrefs(ctx)
+		if err != nil {
+			return err
+		}
+		mp := &ipn.MaskedPrefs{
+			Prefs:              ipn.Prefs{AdvertiseRoutes: prefs.AdvertiseRoutes},
+			AdvertiseRoutesSet: true,
+		}
+		mp.Prefs.SetAdvertiseExitNode(on)
+		if on {
+			mp.Prefs.ExitNodeID = ""
+			mp.ExitNodeIDSet = true
+			mp.ExitNodeIPSet = true
+			mp.AutoExitNodeSet = true // and stop picking one automatically
+		}
+		_, err = h.lc.EditPrefs(ctx, mp)
 		return err
 	})
 }

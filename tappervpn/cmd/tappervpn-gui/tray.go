@@ -73,7 +73,7 @@ func trayUpdate(m Model) {
 	systray.SetTooltip(tip)
 
 	// Rebuild the menu only when something on it changed.
-	key := fmt.Sprintf("%s|%v|%v|%v", m.State, m.ServiceErr != "", m.Self, m.Exit)
+	key := fmt.Sprintf("%s|%v|%v|%v|%v", m.State, m.ServiceErr != "", m.Self, m.Exit, m.OfferExit)
 	for _, d := range m.Devices {
 		if d.ExitNode {
 			key += fmt.Sprintf("|%s:%v", d.ID, d.Online)
@@ -161,6 +161,9 @@ func (t *tray) build(ctx context.Context, m Model) {
 		if !any {
 			exits.AddSubMenuItem("No device offers an exit node", "").Disable()
 		}
+		offer := systray.AddMenuItemCheckbox("Offer this PC as an exit node", "Let other devices send their internet traffic through this PC", m.OfferExit)
+		on := !m.OfferExit
+		onClick(ctx, offer, func() { h.SetOfferExit(on) })
 	}
 	admin := systray.AddMenuItem("Admin page", m.AdminURL)
 	url := m.AdminURL
