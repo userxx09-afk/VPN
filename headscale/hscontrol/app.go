@@ -106,6 +106,9 @@ type Headscale struct {
 	mapBatcher     *mapper.Batcher
 
 	clientStreamsOpen sync.WaitGroup
+
+	// TapperVPN: pairing for plain WireGuard devices (wgbridge.go).
+	wgBridge *wgBridge
 }
 
 var (
@@ -136,6 +139,7 @@ func NewHeadscale(cfg *types.Config) (*Headscale, error) {
 		noisePrivateKey:   noisePrivateKey,
 		clientStreamsOpen: sync.WaitGroup{},
 		state:             s,
+		wgBridge:          newWGBridge(cfg.Database.Sqlite.Path),
 	}
 
 	if cfg.DNSConfig.Certificates.Enabled {
@@ -519,6 +523,10 @@ func (h *Headscale) createRouter(apiV1Mux, apiV2Mux http.Handler) *chi.Mux {
 
 	r.Post("/verify", h.VerifyHandler)
 
+	// TapperVPN: WireGuard bridge pairing (Fire TV on Vega OS), wgbridge.go.
+	r.Post("/tappervpn/wg/pair", h.WGPairHandler)
+	r.Get("/tappervpn/wg/config", h.WGConfigHandler)
+
 	if h.cfg.DERP.ServerEnabled {
 		r.HandleFunc("/derp", h.DERPServer.DERPHandler)
 		r.HandleFunc("/derp/probe", derpServer.DERPProbeHandler)
@@ -841,7 +849,6 @@ func (h *Headscale) Serve() error {
 	} else {
 		log.Info().Msg("metrics server disabled (metrics_listen_addr is empty)")
 	}
-
 
 	// Handle common process-killing signals so we can gracefully shut down:
 	sigc := make(chan os.Signal, 1)

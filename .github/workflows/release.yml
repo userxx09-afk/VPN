@@ -133,7 +133,7 @@ jobs:
           for cmd in tappervpn tappervpnd tappervpn-updater; do
             go build -trimpath -ldflags "$LDFLAGS" -o "$STAGE/server/$cmd" ./cmd/$cmd
           done
-          cp ../server/install.sh ../server/policy.hujson "$STAGE/server/"
+          cp ../server/install.sh ../server/wg-bridge.sh ../server/policy.hujson "$STAGE/server/"
           tar -czf "$OUT/tappervpn-server-linux-amd64.tar.gz" -C "$STAGE/server" .
 
       - name: Routers (tappervpn-glinet-<cpu>.ipk)
