@@ -62,6 +62,8 @@ cd ../headscale && go build -o ../bin/ ./cmd/headscale
 
 - Android: `scripts\build-android.ps1` (output `bin\tappervpn-debug.apk`).
 - Routers: `python glinet/build.py` (see [glinet/README.md](glinet/README.md)).
+- Fire TV on Vega OS: `scripts/build-vega.sh` on Ubuntu with Amazon's Vega SDK
+  (see [tappervpn-vega/README.md](tappervpn-vega/README.md)).
 - Everything, signed, for a release: `scripts\release.ps1`.
 
 ## Releases and auto-update

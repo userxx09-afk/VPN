@@ -9,7 +9,7 @@ id = "com.tappervpn.vega"
 icon = "@image/icon.png"
 
 [os.version]
-min = "1.2"
+min = "2.0"
 target = "2.0"
 
 [components]

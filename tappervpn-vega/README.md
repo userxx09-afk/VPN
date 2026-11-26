@@ -75,34 +75,75 @@ also moves the server's own traffic). The bridge's key and peer list are in
 `/etc/tappervpn/wg-bridge/`; back that folder up with the server's database.
 A lost bridge key only means pairing the TVs again.
 
-## Building
+## Ubuntu build machine
 
-Needs Node 22 and, for the final `.vpkg`, Amazon's Vega SDK (macOS or Ubuntu;
-on Windows use WSL): https://developer.amazon.com/docs/vega/2.0/install-vega-sdk
+The `.vpkg` is built with Amazon's Vega SDK, on Ubuntu (or macOS). These
+steps are from Amazon's Vega 2.0 docs
+([install](https://developer.amazon.com/docs/vega/2.0/install-vega-sdk),
+[build](https://developer.amazon.com/docs/vega/2.0/build-an-app),
+[run on a Fire TV](https://developer.amazon.com/docs/vega/2.0/run-apps),
+[over the network](https://developer.amazon.com/docs/vega/2.0/vda-over-tcpip)).
 
-```sh
-cd tappervpn-vega
-npm ci
-npm run typecheck && npm test
-npm run build:app        # needs the Vega SDK; output in build/
-```
-
-`npm run bundle` builds the Hermes bundle without the SDK (GitHub's `build`
-workflow does this on every push).
-
-Install on a Fire TV in Developer Mode (Settings > My Fire TV > Developer
-Options):
+**1. Once per machine**
 
 ```sh
-vega devmode login
-vega devmode enable-device --code <code shown on the TV>
-vega device install-app --packagePath <the .vpkg in build/>
-vega device launch-app --appName com.tappervpn.vega.main
+# Node 22 or newer (the SDK installer checks it), Git, VS Code (optional:
+# the installer adds Amazon's Vega Studio extension to it).
+sudo apt remove curl && sudo apt install curl        # Amazon asks for the apt curl
+sudo add-apt-repository -y ppa:deadsnakes/ppa && sudo apt update
+sudo apt install jq build-essential lz4 libpython3.8-dev
+
+curl -fsSL https://sdk-installer.vega.labcollab.net/get_vvm.sh | bash && source ~/vega/env
+vega --version        # shows "Active SDK Version" and "Vega CLI Version"
 ```
 
-Retail Vega TVs only install apps from the Amazon Appstore, so for every TV
-in the house the app has to be published there (it can be unlisted or
-limited to your account). That also needs the VPN access above.
+The SDK goes in `~/vega`; it's a download, nothing in it needs backing up.
+
+**2. Build**
+
+```sh
+git clone https://github.com/userxx09-afk/VPN && cd VPN
+scripts/build-vega.sh
+```
+
+That runs `npm ci`, the type check and tests, then `npm run build:app`, and
+prints the package path: `tappervpn-vega/build/armv7-release/<name>_armv7.vpkg`
+(Fire TV sticks are armv7; `VEGA_ARCH=x86_64 scripts/build-vega.sh` for the
+Vega Virtual Device). Without the SDK, `npm run bundle` builds only the Hermes
+bundle, which GitHub's `build` workflow does on every push.
+
+**3. Put a Fire TV in Developer Mode (once per TV)**
+
+On the TV: Settings > My Fire TV > About, press Select seven times on the
+device name, then Back > Developer options > Developer Mode. On Ubuntu:
+
+```sh
+vega devmode login                         # signs in to your Amazon developer account
+vega devmode enable-device --code <6-character code shown on the TV>
+vega device list                           # the TV restarts, then shows here
+```
+
+**4. Install and run**
+
+```sh
+scripts/build-vega.sh --install            # TV on USB
+```
+
+To use the TV over the network instead (same network, IP under Settings >
+My Fire TV > About > Network): with USB plugged in, run
+`vega exec vda tcpip 5555`, unplug, then
+
+```sh
+VEGA_SERIAL=<tv ip>:5555 scripts/build-vega.sh --install
+```
+
+By hand: `vega device install-app --packagePath <vpkg>` and
+`vega device launch-app --appName com.tappervpn.vega.main`
+(add `-d <serial>` after `device` when several are connected).
+
+Developer Mode is for testing. TVs not in Developer Mode only install apps
+from the Amazon Appstore, so for everyday use the app has to go through the
+Appstore, which also needs the VPN access above.
 
 ## Files
 
