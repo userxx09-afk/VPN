@@ -16,13 +16,25 @@ const K = {
   autoConnect: 'tappervpn.autoConnect',
 };
 
+/** Secure random bytes: the system crypto module, else Web Crypto. */
+async function secureRandom(n: number): Promise<ArrayLike<number>> {
+  try {
+    return await new Crypto().getRandom(n);
+  } catch (e) {
+    const wc = (globalThis as {crypto?: {getRandomValues?: (a: Uint8Array) => Uint8Array}}).crypto;
+    if (wc?.getRandomValues) {
+      return wc.getRandomValues(new Uint8Array(n));
+    }
+    throw new Error(`No secure random source on this TV (${e instanceof Error ? e.message : e})`);
+  }
+}
+
 export async function loadKeyPair(): Promise<KeyPair> {
   const saved = await AsyncStorage.getItem(K.privateKey);
   if (saved && isWireGuardKey(saved)) {
     return {privateKey: saved, publicKey: publicKeyFor(saved)};
   }
-  const random = await new Crypto().getRandom(32);
-  const kp = keyPairFrom(random);
+  const kp = keyPairFrom(await secureRandom(32));
   await AsyncStorage.setItem(K.privateKey, kp.privateKey);
   return kp;
 }

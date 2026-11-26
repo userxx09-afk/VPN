@@ -6,7 +6,7 @@
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {ActivityIndicator, View} from 'react-native';
 
-import {Body, colors, styles} from './components/ui';
+import {Body, colors, FocusButton, styles, Title} from './components/ui';
 import type {KeyPair} from './lib/keys';
 import {PairingClient, type BridgeConfig, type Fetch} from './lib/pairing';
 import * as store from './lib/storage';
@@ -38,9 +38,13 @@ export function App() {
     [server],
   );
 
+  const [fatal, setFatal] = useState<string | null>(null);
+  const [startTry, setStartTry] = useState(0);
+
   // Load what's saved, then follow the tunnel's status.
   useEffect(() => {
     (async () => {
+      try {
       const [k, s, c, m, a, why] = await Promise.all([
         store.loadKeyPair(),
         store.loadServer(),
@@ -56,13 +60,19 @@ export function App() {
       setAutoConnect(a);
       setUnavailable(why);
       setStatus(await engine.status());
+      setFatal(null);
       setReady(true);
+      } catch (e) {
+        const msg = e instanceof Error ? `${e.message}` : String(e);
+        console.error('[TapperVPN] startup failed:', msg);
+        setFatal(msg);
+      }
     })();
     return engine.subscribe((s, d) => {
       setStatus(s);
       setDetail(d ?? null);
     });
-  }, [engine]);
+  }, [engine, startTry]);
 
   // Pick up changes made on the server (DNS, port) and notice removal.
   useEffect(() => {
@@ -145,6 +155,16 @@ export function App() {
     setKeys(await store.loadKeyPair());
     setScreen('home');
   }, [status, engine]);
+
+  if (fatal) {
+    return (
+      <View style={[styles.screen, {justifyContent: 'center'}]}>
+        <Title>TapperVPN couldn't start</Title>
+        <Body>{fatal}</Body>
+        <FocusButton label="Try again" primary preferredFocus onPress={() => setStartTry(n => n + 1)} />
+      </View>
+    );
+  }
 
   if (!ready || !keys || !server || !client) {
     return (
