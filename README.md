@@ -12,6 +12,7 @@ Everything needed to build and release TapperVPN is in this repo:
 | `tappervpn/` | Client: daemon `tappervpnd`, CLI `tappervpn`, our updater (`updater/`, `cmd/tappervpn-updater`, `cmd/tappervpn-release`) | Tailscale (BSD-3) |
 | `headscale/` | Control server | Headscale (BSD-3) |
 | `tappervpn-android/` | Android and Fire TV app (`com.tappervpn.ipn`) | tailscale-android (BSD-3) |
+| `tappervpn-vega/` | Fire TV on Vega OS app (`com.tappervpn.vega`), connects through the server's WireGuard bridge (`server/wg-bridge.sh`) | ours |
 | `glinet/` | Package for GL.iNet / OpenWrt routers | ours |
 | `server/` | Server config, policy, `install.sh` for the Ubuntu server | ours |
 | `scripts/` | Build, install, release and rebrand scripts | ours |
@@ -31,6 +32,7 @@ is `com.tappervpn.ipn`. "Tailscale" still appears in the copyright notices
 | Server database and keys (`server/data/`, `/var/lib/headscale/` on the server) | Your private backup | Whoever has them controls the network |
 | Release signing key | `%USERPROFILE%\.tappervpn\release.key` | Whoever has it can push updates to every device |
 | Android signing key | `%USERPROFILE%\.android\debug.keystore` | Android only accepts updates signed with the same key |
+| WireGuard bridge key and paired TVs (`/etc/tappervpn/wg-bridge/` on the server, once `wg-bridge install` has run) | Your private backup, with the server database | Losing it only means pairing the Vega TVs again |
 | Toolchains: Go, JDK 17, Android SDK/NDK | Download (see below) | Several GB |
 
 **Back up the two signing keys.** If the release key is lost, devices refuse
@@ -124,6 +126,10 @@ installed one.
 - **Routers**: see [glinet/README.md](glinet/README.md).
 - **Android / Fire TV**: install `tappervpn-android.apk`. The first update asks
   you to allow TapperVPN to install apps.
+- **Fire TV on Vega OS** (Fire TV Stick 4K Select and newer): see
+  [tappervpn-vega/README.md](tappervpn-vega/README.md). Vega only allows a
+  WireGuard VPN, so these TVs connect through a WireGuard bridge on the server,
+  and Amazon has to give the app access to its VPN API first.
 
 ## Running the dev mesh (Windows)
 
