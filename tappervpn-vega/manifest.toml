@@ -1,0 +1,29 @@
+# Vega OS app manifest for TapperVPN (Fire TV Stick 4K Select and other
+# Vega Fire TVs). Package ids starting com.amazon can't be sideloaded.
+schema-version = 1
+
+[package]
+title = "TapperVPN"
+version = "0.1.0"
+id = "com.tappervpn.vega"
+icon = "@image/icon.png"
+
+[os.version]
+min = "2.0"
+target = "2.0"
+
+[components]
+[[components.interactive]]
+id = "com.tappervpn.vega.main"
+runtime-module = "/com.amazon.kepler.runtime.react_native_kepler_4@IReactNativeKepler_0"
+categories = ["com.amazon.category.main"]
+launch-type = "singleton"
+
+[needs]
+[[needs.privilege]]
+id = "com.amazon.network.privilege.net-info"
+
+# The system VPN privilege goes here once Amazon gives TapperVPN access to
+# its VPN Manager API (its id isn't public yet), for example:
+# [[needs.privilege]]
+# id = "<VPN Manager privilege from Amazon>"

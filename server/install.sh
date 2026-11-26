@@ -74,6 +74,10 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
+# WireGuard bridge for Vega OS Fire TVs and other plain WireGuard devices
+# (off until "wg-bridge install").
+[ ! -f "$SRC/wg-bridge.sh" ] || install -m 0755 "$SRC/wg-bridge.sh" /usr/local/sbin/wg-bridge
+
 # The server can also be a node of its own network (e.g. an exit node). Its
 # agent runs as tappervpnd; join it with server/join-exit-node.sh.
 [ -f /etc/default/tappervpnd ] || cat >/etc/default/tappervpnd <<'EOF'

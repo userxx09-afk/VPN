@@ -84,7 +84,7 @@ GoBuild "$root\headscale" "linux" "$stage\server\headscale" "./cmd/headscale"
 foreach ($cmd in "tappervpn", "tappervpnd", "tappervpn-updater") {
     GoBuild "$root\tappervpn" "linux" "$stage\server\$cmd" "./cmd/$cmd"
 }
-Copy-Item "$root\server\install.sh", "$root\server\policy.hujson" "$stage\server\"
+Copy-Item "$root\server\install.sh", "$root\server\wg-bridge.sh", "$root\server\policy.hujson" "$stage\server\"
 & tar -czf "$out\tappervpn-server-linux-amd64.tar.gz" -C "$stage\server" .
 if ($LASTEXITCODE) { throw "tar failed" }
 

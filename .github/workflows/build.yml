@@ -64,6 +64,13 @@ jobs:
         working-directory: headscale
         run: go build ./cmd/headscale
 
+      - name: Test WireGuard bridge pairing (Vega Fire TV)
+        working-directory: headscale
+        run: go test ./hscontrol/ -run 'TestWGBridge' -count=1
+
+      - name: Check wg-bridge.sh
+        run: sh -n server/wg-bridge.sh && shellcheck -s sh -S warning server/wg-bridge.sh
+
   android:
     name: Android / Fire TV APK
     runs-on: ubuntu-latest
@@ -136,3 +143,23 @@ jobs:
           name: tappervpn-debug-apk
           path: tappervpn-android/android/build/outputs/apk/debug/android-debug.apk
           if-no-files-found: error
+
+  vega:
+    name: Vega Fire TV app (types, tests, Hermes bundle)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tappervpn-vega
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tappervpn-vega/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm test
+      # Packaging the .vpkg needs Amazon's Vega SDK, which isn't on GitHub's
+      # runners; this checks everything up to it.
+      - run: npm run bundle
