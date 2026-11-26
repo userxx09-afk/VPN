@@ -2,7 +2,6 @@
 // server sent, and the route mode. AsyncStorage is private to this app.
 
 import AsyncStorage from '@amazon-devices/react-native-async-storage__async-storage';
-import {Crypto} from '@amazon-devices/keplercrypto';
 
 import {isWireGuardKey, keyPairFrom, publicKeyFor, type KeyPair} from './keys';
 import {DEFAULT_SERVER, parseConfig, type BridgeConfig} from './pairing';
@@ -19,6 +18,8 @@ const K = {
 /** Secure random bytes: the system crypto module, else Web Crypto. */
 async function secureRandom(n: number): Promise<ArrayLike<number>> {
   try {
+    // Loaded here, not at the top, so a missing module can't stop the app loading.
+    const {Crypto} = require('@amazon-devices/keplercrypto');
     return await new Crypto().getRandom(n);
   } catch (e) {
     const wc = (globalThis as {crypto?: {getRandomValues?: (a: Uint8Array) => Uint8Array}}).crypto;
