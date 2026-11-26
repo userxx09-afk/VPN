@@ -8,7 +8,7 @@
 // below. When Amazon's package arrives, adjust MODULE_NAMES and the
 // SystemVpnModule shape to match it; nothing else in the app changes.
 
-import {NativeEventEmitter, NativeModules, TurboModuleRegistry} from 'react-native';
+import {NativeEventEmitter, TurboModuleRegistry} from 'react-native';
 
 import type {TunnelSettings} from '../lib/tunnel';
 import {NOT_AVAILABLE, UnavailableEngine, type VpnEngine, type VpnStatus} from './VpnEngine';
@@ -46,7 +46,8 @@ function findModule(): SystemVpnModule | null {
     } catch {
       m = null;
     }
-    m = m ?? (NativeModules as Record<string, unknown>)[name];
+    // Only TurboModuleRegistry.get: on Vega, reading a missing module through
+    // NativeModules[name] aborts the app, even inside try/catch.
     const mod = m as Partial<SystemVpnModule> | null;
     if (mod && typeof mod.configureWireGuard === 'function' && typeof mod.start === 'function') {
       return mod as SystemVpnModule;

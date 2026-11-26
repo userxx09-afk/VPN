@@ -15,12 +15,18 @@ import {HomeScreen} from './screens/HomeScreen';
 import {PairScreen} from './screens/PairScreen';
 import {SettingsScreen} from './screens/SettingsScreen';
 import {systemEngine} from './vpn/system';
-import type {VpnStatus} from './vpn/VpnEngine';
+import {NOT_AVAILABLE, UnavailableEngine, type VpnEngine, type VpnStatus} from './vpn/VpnEngine';
 
 type Screen = 'home' | 'settings';
 
 export function App() {
-  const engine = useMemo(() => systemEngine(), []);
+  const engine = useMemo<VpnEngine>(() => {
+    try {
+      return systemEngine();
+    } catch {
+      return new UnavailableEngine(NOT_AVAILABLE);
+    }
+  }, []);
   const [keys, setKeys] = useState<KeyPair | null>(null);
   const [server, setServer] = useState<string | null>(null);
   const [config, setConfig] = useState<BridgeConfig | null>(null);

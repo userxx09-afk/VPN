@@ -23,9 +23,6 @@ launch-type = "singleton"
 [[needs.privilege]]
 id = "com.amazon.network.privilege.net-info"
 
-[[needs.module]]
-id = "/com.amazon.vega.os@IVega_1_2"
-
 # The system VPN privilege goes here once Amazon gives TapperVPN access to
 # its VPN Manager API (its id isn't public yet), for example:
 # [[needs.privilege]]
