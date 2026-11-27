@@ -14,7 +14,18 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
+import android.widget.Toast
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
@@ -122,6 +133,17 @@ fun PeerDetails(
             ControlDeviceRow(stableID = node.StableID.toString())
           }
 
+          if (node.Online == true) {
+            item(key = "remoteRestart") {
+              RestartDeviceRow(
+                  stableID = node.StableID.toString(),
+                  name = node.displayName,
+                  canReboot =
+                      node.Hostinfo.OS?.lowercase()?.let { it == "windows" || it == "linux" } ==
+                          true)
+            }
+          }
+
           item(key = "remoteControlDivider") { Lists.SectionDivider() }
 
           item(key = "tappervpnAddresses") {
@@ -184,6 +206,68 @@ fun ControlDeviceRow(stableID: String) {
       supportingContent = { Text(text = stringResource(R.string.remote_control_device_desc)) },
       trailingContent = { Icon(painter = painterResource(R.drawable.sensors_24), null) },
   )
+}
+
+/**
+ * "Restart this device": shown only when this device was allowed on the Tapper Dashboard to
+ * restart others ("Can restart others"). The other device checks that permission too.
+ */
+@Composable
+fun RestartDeviceRow(stableID: String, name: String, canReboot: Boolean) {
+  val context = LocalContext.current
+  val scope = rememberCoroutineScope()
+  var allowed by remember { mutableStateOf(false) }
+  var choosing by remember { mutableStateOf(false) }
+  LaunchedEffect(stableID) {
+    allowed = withContext(Dispatchers.IO) { RemoteControlManager.canRestartOthers() }
+  }
+  if (!allowed) return
+
+  fun send(what: String) {
+    choosing = false
+    scope.launch {
+      val (_, msg) =
+          withContext(Dispatchers.IO) { RemoteControlManager.requestRestart(stableID, what) }
+      Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+    }
+  }
+
+  ListItem(
+      modifier = Modifier.clickable { choosing = true },
+      colors = MaterialTheme.colorScheme.listItem,
+      headlineContent = { Text(text = stringResource(R.string.remote_restart_device)) },
+      supportingContent = { Text(text = stringResource(R.string.remote_restart_device_desc)) },
+  )
+  if (choosing) {
+    AlertDialog(
+        onDismissRequest = { choosing = false },
+        title = { Text(text = name) },
+        text = {
+          Text(
+              text =
+                  stringResource(
+                      if (canReboot) R.string.remote_restart_choose
+                      else R.string.remote_restart_vpn_only))
+        },
+        confirmButton = {
+          TextButton(onClick = { send("vpn") }) {
+            Text(text = stringResource(R.string.remote_restart_vpn))
+          }
+        },
+        dismissButton = {
+          Row {
+            if (canReboot) {
+              TextButton(onClick = { send("device") }) {
+                Text(text = stringResource(R.string.remote_restart_reboot))
+              }
+            }
+            TextButton(onClick = { choosing = false }) {
+              Text(text = stringResource(R.string.remote_restart_cancel))
+            }
+          }
+        },
+    )
+  }
 }
 
 @Composable

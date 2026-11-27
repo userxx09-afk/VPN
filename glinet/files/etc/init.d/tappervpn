@@ -50,7 +50,8 @@ start_service() {
 		--socket="$RUN_DIR/tappervpnd.sock" \
 		--tun=tapper0 \
 		--port="$port"
-	procd_set_param env TS_NO_LOGS_NO_SUPPORT=true
+	# TAPPERVPN_RESTART_CMD: how a remote "restart VPN" request restarts us (it also re-applies routing).
+	procd_set_param env TS_NO_LOGS_NO_SUPPORT=true TAPPERVPN_RESTART_CMD="/etc/init.d/tappervpn restart"
 	procd_set_param respawn 3600 5 0
 	procd_set_param stdout 1
 	procd_set_param stderr 1

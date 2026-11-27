@@ -46,6 +46,7 @@ type Model struct {
 	AllowLAN   bool       `json:"allowLAN"`
 	OfferExit  bool       `json:"offerExit"`  // this PC offers itself as an exit node
 	AutoAccept bool       `json:"autoAccept"` // trusted controllers skip the Allow prompt
+	CanRestart bool       `json:"canRestart"` // allowed on the dashboard to restart other devices
 	Devices    []Device   `json:"devices"`
 	Health     []string   `json:"health,omitempty"`
 	Error      string     `json:"error,omitempty"` // last failed action
@@ -63,6 +64,9 @@ type Device struct {
 	OS       string               `json:"os"`
 	Online   bool                 `json:"online"`
 	ExitNode bool                 `json:"exitNode"` // offers itself as an exit node
+	// CanReboot: the whole device can be rebooted remotely (its VPN runs as
+	// a system service: Windows, Linux, routers). Phones and TVs can't.
+	CanReboot bool `json:"canReboot"`
 	LastSeen string               `json:"lastSeen,omitempty"`
 }
 
@@ -210,6 +214,10 @@ func toDevice(ps *ipnstate.PeerStatus) Device {
 		Online:   ps.Online,
 		ExitNode: ps.ExitNodeOption,
 	}
+	switch strings.ToLower(ps.OS) {
+	case "windows", "linux":
+		d.CanReboot = true
+	}
 	for _, ip := range ps.TapperVPNIPs {
 		if ip.Is4() && d.IP == "" {
 			d.IP = ip.String()
@@ -268,6 +276,9 @@ func (h *hub) read() Model {
 		d := toDevice(st.Self)
 		d.Online = st.BackendState == ipn.Running.String()
 		m.Self = &d
+		if st.Self.Tags != nil {
+			m.CanRestart = slices.Contains(st.Self.Tags.AsSlice(), restarterTag)
+		}
 	}
 	var exitID tailcfg.StableNodeID
 	if es := st.ExitNodeStatus; es != nil && !es.ID.IsZero() {
@@ -449,6 +460,47 @@ func (h *hub) RemoteControl(id tailcfg.StableNodeID) error {
 		}
 		return nil
 	})
+}
+
+// restarterTag is given by the "Can restart others" switch on the Tapper
+// Dashboard (feature/remotecontrol.RestarterTag).
+const restarterTag = "tag:remote-restart"
+
+// RemoteRestart asks the device with the given stable node ID to restart its
+// VPN (what "vpn") or reboot (what "device"). It returns the device's answer.
+// Only works when this PC is allowed to on the dashboard; the other device
+// checks that too.
+func (h *hub) RemoteRestart(id tailcfg.StableNodeID, what string) (string, error) {
+	if id == "" {
+		return "", errors.New("no device given")
+	}
+	if what != "device" {
+		what = "vpn"
+	}
+	var msg string
+	err := h.do("Asking to restart", func(ctx context.Context) error {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+			"http://local-tappervpnd.sock/localapi/v0/remotecontrol/restart?id="+url.QueryEscape(string(id))+"&what="+what, nil)
+		if err != nil {
+			return err
+		}
+		resp, err := h.lc.DoLocalRequest(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode/100 != 2 {
+			return fmt.Errorf("%s", strings.TrimSpace(string(body)))
+		}
+		var r struct {
+			Message string `json:"message"`
+		}
+		json.Unmarshal(body, &r)
+		msg = r.Message
+		return nil
+	})
+	return msg, err
 }
 
 // readAutoAccept reports this PC's "Auto accept remote control" switch.

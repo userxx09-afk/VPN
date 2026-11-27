@@ -168,6 +168,9 @@ type Application interface {
 	SendRemoteControlInput(kind, x, y, button int32, down bool, code int32, text string)
 	// StopRemoteControl ends any active session on this device.
 	StopRemoteControl()
+	// SetRemoteRestarter lets devices allowed on the Tapper Dashboard restart
+	// this device's VPN remotely.
+	SetRemoteRestarter(r RemoteRestarter)
 }
 
 // FileParts is an array of multiple FileParts.

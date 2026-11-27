@@ -115,6 +115,12 @@ func (s *webServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		err = h.SetAutoAccept(req.On)
 	case "/api/remote-control":
 		err = h.RemoteControl(tailcfg.StableNodeID(req.ID))
+	case "/api/restart":
+		var msg string
+		if msg, err = h.RemoteRestart(tailcfg.StableNodeID(req.ID), req.Mode); err == nil {
+			writeJSON(w, map[string]any{"message": msg})
+			return
+		}
 	case "/api/app-routing":
 		err = h.SetAppRouting(req.Mode, req.Apps)
 	case "/api/running-apps":

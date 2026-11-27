@@ -431,6 +431,15 @@
     <string name="remote_control_a11y_description">Lets a device you approve on your TapperVPN network control this device (taps, swipes, text, and Home/Back) while a remote-control session is active. Raw D-pad keys into other apps are not available without this.</string>
     <string name="remote_control_device">Control this device</string>
     <string name="remote_control_device_desc">View its screen and control it (it must accept)</string>
+    <string name="remote_restart_device">Restart this device</string>
+    <string name="remote_restart_device_desc">Ask it to restart if it\'s having problems</string>
+    <string name="remote_restart_vpn">Restart its VPN</string>
+    <string name="remote_restart_reboot">Reboot the device</string>
+    <string name="remote_restart_cancel">Cancel</string>
+    <string name="remote_restart_choose">Restarting the VPN fixes most connection problems and doesn\'t interrupt anything else. Rebooting restarts the whole device in 30 seconds.</string>
+    <string name="remote_restart_vpn_only">This restarts TapperVPN on that device. Phones and TVs can\'t be rebooted by an app.</string>
+    <string name="remote_restart_sent">Asked it to restart</string>
+    <string name="remote_restart_incoming">%1$s restarted TapperVPN on this device</string>
     <string name="remote_control_auto_accept">Auto accept remote control</string>
     <string name="remote_control_auto_accept_subtitle">Devices marked as trusted controllers on the Tapper Dashboard can take control without asking. Others still have to be allowed.</string>
 </resources>

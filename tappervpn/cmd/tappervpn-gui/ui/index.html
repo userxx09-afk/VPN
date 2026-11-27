@@ -114,11 +114,27 @@ async function api(path, body) {
   } catch (e) { return false; }
 }
 
-function toast(text) {
+// apiMessage is api() for actions that answer with {"message"}: the message,
+// or null if it failed (the error then shows in the banner).
+async function apiMessage(path, body) {
+  try {
+    const r = await fetch("/api/" + path, {
+      method: "POST",
+      headers: {"Content-Type": "application/json", "X-TapperVPN-Token": token},
+      body: JSON.stringify(body || {}),
+    });
+    if (!r.ok) return null;
+    return (await r.json()).message || "";
+  } catch (e) { return null; }
+}
+
+let restartOpen = null; // device whose Restart choices are showing
+
+function toast(text, ms) {
   const t = $("#toast");
   t.textContent = text; t.classList.add("show");
   clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => t.classList.remove("show"), 1600);
+  toast.timer = setTimeout(() => t.classList.remove("show"), ms || 1600);
 }
 async function copy(text) {
   try { await navigator.clipboard.writeText(text); toast("Copied " + text); }
@@ -149,11 +165,20 @@ function devRow(d, opts = {}) {
   const control = d.online && !opts.self
     ? `<button class="icon-btn" data-control="${esc(d.id)}" data-name="${esc(d.name)}" title="View and control ${esc(d.name)} (it must accept on its screen)">Control</button>`
     : "";
+  let restart = "";
+  if (m.canRestart && d.online && !opts.self) {
+    restart = restartOpen === d.id
+      ? `<button class="icon-btn" data-restart="${esc(d.id)}" data-mode="vpn" data-name="${esc(d.name)}" title="Restart TapperVPN on ${esc(d.name)}">Restart VPN</button>` +
+        (d.canReboot ? `<button class="icon-btn" data-restart="${esc(d.id)}" data-mode="device" data-name="${esc(d.name)}" title="Reboot ${esc(d.name)} in 30 seconds">Reboot device</button>` : "") +
+        `<button class="icon-btn" data-restart="" title="Cancel">Cancel</button>`
+      : `<button class="icon-btn" data-restart="${esc(d.id)}" data-name="${esc(d.name)}" title="Ask ${esc(d.name)} to restart if it's having problems">Restart</button>`;
+  }
   return `<div class="row click" data-copy="${esc(d.ip)}" title="Click to copy ${esc(d.ip)}">
     <span class="dot ${d.online ? "on" : ""}"></span>
     <div class="grow"><div class="name">${esc(d.name)} ${d.exitNode && !opts.self ? '<span class="badge">exit node</span>' : ""}</div>
     <div class="meta mono">${esc(meta)}</div></div>
-    ${control}
+    ${restartOpen === d.id ? "" : control}
+    ${restart}
     <button class="icon-btn" data-copy="${esc(d.ip)}" title="Copy address">Copy</button></div>`;
 }
 
@@ -315,7 +340,7 @@ function settingsCard() {
 }
 
 document.addEventListener("click", async (e) => {
-  const t = e.target.closest("[data-copy],[data-control],[data-exit],[data-open],[data-armode],[data-arremove],#aradd,#signin,#signout,#check,#install");
+  const t = e.target.closest("[data-copy],[data-control],[data-restart],[data-exit],[data-open],[data-armode],[data-arremove],#aradd,#signin,#signout,#check,#install");
   if (!t) return;
   const ar = m.appRouting || {};
   if (t.dataset.armode) { saveApps(t.dataset.armode, t.dataset.armode === "off" ? [] : ar.apps); if (t.dataset.armode !== "off") loadRunningApps(); return; }
@@ -329,6 +354,16 @@ document.addEventListener("click", async (e) => {
     e.stopPropagation();
     const ok = await api("remote-control", {id: t.dataset.control});
     toast(ok ? "Asked " + (t.dataset.name || "device") + " — allow it on that screen" : "Couldn't start the session");
+    return;
+  }
+  if (t.dataset.restart !== undefined) {
+    e.stopPropagation();
+    const id = t.dataset.restart, mode = t.dataset.mode, name = t.dataset.name || "the device";
+    if (!id || !mode) { restartOpen = id || null; render(); return; }
+    if (mode === "device" && !confirm("Reboot " + name + "? Anyone using it loses what they're doing. It reboots in 30 seconds.")) return;
+    restartOpen = null; render();
+    const msg = await apiMessage("restart", {id, mode});
+    if (msg !== null) toast(msg || "Asked " + name + " to restart", 4000);
     return;
   }
   if (t.dataset.copy !== undefined) { e.stopPropagation(); if (t.dataset.copy) copy(t.dataset.copy); return; }
