@@ -14,7 +14,10 @@
     "tag:device": ["admin@"],
     // "Trusted controller" switch on the dashboard: may take remote control without the
     // Allow prompt, but only of devices whose own app has "Auto accept remote control" on.
-    "tag:remote-admin": ["admin@"]
+    "tag:remote-admin": ["admin@"],
+    // "Can restart others" switch on the dashboard: may ask other devices to restart their
+    // VPN (or reboot, on Windows/Linux/routers). Checked by the device being restarted.
+    "tag:remote-restart": ["admin@"]
   },
 
   // Workstations may SSH into the home server over the VPN ("tappervpn ssh claude@100.64.0.2"),

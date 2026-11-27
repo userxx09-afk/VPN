@@ -285,3 +285,31 @@ func (v *rcViewer) Resize(s remotecontrol.ScreenSize)      { v.cb.Resize(int32(s
 func (v *rcViewer) Input() <-chan remotecontrol.InputEvent { return v.input }
 func (v *rcViewer) Close()                                 { v.cb.Close() }
 func (v *rcViewer) Notice(msg string)                      { v.cb.Notice(msg) }
+
+// RemoteRestarter is implemented in Kotlin. A device allowed on the Tapper
+// Dashboard to restart others can ask this one to restart its VPN; Go checks
+// that permission, then calls RestartVPN. Android apps can't reboot the
+// device, so only the VPN is restarted.
+type RemoteRestarter interface {
+	// RestartVPN restarts the VPN service and tells the user who asked.
+	RestartVPN(fromName string)
+}
+
+// SetRemoteRestarter installs the Kotlin restarter. Pass once at startup.
+func (app *App) SetRemoteRestarter(r RemoteRestarter) {
+	remotecontrol.RegisterRestarter(&rcRestarter{cb: r})
+}
+
+type rcRestarter struct{ cb RemoteRestarter }
+
+func (r *rcRestarter) CanRestart(kind remotecontrol.RestartKind) bool {
+	return kind == remotecontrol.RestartVPN
+}
+
+func (r *rcRestarter) Restart(kind remotecontrol.RestartKind, from string) error {
+	if kind != remotecontrol.RestartVPN {
+		return errors.New("this device can't be rebooted by an app")
+	}
+	r.cb.RestartVPN(from)
+	return nil
+}

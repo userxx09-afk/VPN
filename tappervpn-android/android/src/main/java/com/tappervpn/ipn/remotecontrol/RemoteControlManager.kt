@@ -6,10 +6,16 @@ package com.tappervpn.ipn.remotecontrol
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.util.DisplayMetrics
 import android.view.WindowManager
+import android.widget.Toast
+import com.tappervpn.ipn.App
+import com.tappervpn.ipn.R
 import com.tappervpn.ipn.ui.util.AndroidTVUtil
 import com.tappervpn.ipn.util.TSLog
+import java.net.URLEncoder
 import java.util.concurrent.SynchronousQueue
 import java.util.concurrent.TimeUnit
 
@@ -49,7 +55,7 @@ object RC {
  * a specific peer in [requestConsent]; the Go core returns HTTP 403 to the peer
  * on denial before any stream exists.
  */
-object RemoteControlManager : libtappervpn.RemoteControlHost {
+object RemoteControlManager : libtappervpn.RemoteControlHost, libtappervpn.RemoteRestarter {
   private const val TAG = "RemoteControl"
 
   private lateinit var appContext: Context
@@ -73,6 +79,9 @@ object RemoteControlManager : libtappervpn.RemoteControlHost {
     // (always subject to the per-session consent prompt below).
     app.setRemoteControlHost(this)
     TSLog.d(TAG, "registered remote-control host agent")
+    // Devices allowed on the Tapper Dashboard may restart this one's VPN (Go
+    // checks that before calling restartVPN).
+    app.setRemoteRestarter(this)
   }
 
   /** The live Go application handle, for the controller side. */
@@ -203,6 +212,65 @@ object RemoteControlManager : libtappervpn.RemoteControlHost {
       } catch (e: Exception) {
         TSLog.e(TAG, "setAutoAccept failed: ${e.message}")
         !on
+      }
+
+  // --- remote restart ---
+
+  /**
+   * Called from Go when a device allowed on the Tapper Dashboard asks this one to restart.
+   * An app can't reboot an Android phone or Fire TV, so this restarts the VPN.
+   */
+  override fun restartVPN(fromName: String) {
+    TSLog.d(TAG, "restarting the VPN, as asked by $fromName")
+    Handler(Looper.getMainLooper()).post {
+      Toast.makeText(
+              appContext,
+              appContext.getString(R.string.remote_restart_incoming, fromName),
+              Toast.LENGTH_LONG,
+          )
+          .show()
+    }
+    App.get().restartVPN()
+  }
+
+  /**
+   * Whether this device may restart others ("Can restart others" on the Tapper Dashboard).
+   * Blocking — call off the main thread. False on error.
+   */
+  fun canRestartOthers(): Boolean =
+      try {
+        val resp = app.callLocalAPI(5_000, "GET", "/localapi/v0/remotecontrol/restart", null)
+        (resp.bodyBytes() ?: ByteArray(0)).decodeToString().contains("\"allowed\":true")
+      } catch (e: Exception) {
+        TSLog.e(TAG, "canRestartOthers failed: ${e.message}")
+        false
+      }
+
+  /**
+   * Asks [stableID] to restart: [what] is "vpn" or "device". Returns whether it worked and the
+   * message to show (the device's answer, or why not). Blocking — call off the main thread.
+   */
+  fun requestRestart(stableID: String, what: String): Pair<Boolean, String> =
+      try {
+        val id = URLEncoder.encode(stableID, "UTF-8")
+        val resp =
+            app.callLocalAPI(
+                30_000, "POST", "/localapi/v0/remotecontrol/restart?id=$id&what=$what", null)
+        val body = (resp.bodyBytes() ?: ByteArray(0)).decodeToString().trim()
+        if (resp.statusCode() in 200..299) {
+          val msg =
+              try {
+                org.json.JSONObject(body).optString("message")
+              } catch (e: Exception) {
+                ""
+              }
+          Pair(true, msg.ifEmpty { appContext.getString(R.string.remote_restart_sent) })
+        } else {
+          Pair(false, body.ifEmpty { "HTTP ${resp.statusCode()}" })
+        }
+      } catch (e: Exception) {
+        TSLog.e(TAG, "requestRestart failed: ${e.message}")
+        Pair(false, e.message ?: "failed")
       }
 
   private fun screenSize(): Pair<Int, Int> {

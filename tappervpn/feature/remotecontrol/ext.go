@@ -26,6 +26,8 @@ func init() {
 	localapi.Register("remotecontrol/agent", serveAgent)
 	localapi.Register("remotecontrol/dial", serveDial)
 	localapi.Register("remotecontrol/autoaccept", serveAutoAccept)
+	ipnlocal.RegisterPeerAPIHandler("/remotecontrol/v0/restart", handleRestart)
+	localapi.Register("remotecontrol/restart", serveRestart)
 }
 
 // Extension is the per-LocalBackend remote-control extension. It holds no
@@ -58,6 +60,11 @@ type Target struct {
 	StableID string `json:"stableID"`
 	Name     string `json:"name"`
 	OS       string `json:"os"`
+	// Online is the control server's view; false peers can't be reached.
+	Online bool `json:"online"`
+	// CanReboot: the device's VPN runs as a system service that can reboot it
+	// (Windows, Linux, routers). Phones and TVs can only restart the VPN.
+	CanReboot bool `json:"canReboot"`
 }
 
 // Targets returns the peers reachable over PeerAPI that a controller may ask to
@@ -71,9 +78,11 @@ func (e *Extension) Targets() []Target {
 	ret := make([]Target, 0, len(peers))
 	for _, p := range peers {
 		ret = append(ret, Target{
-			StableID: string(p.StableID()),
-			Name:     peerDisplayName(p),
-			OS:       p.Hostinfo().OS(),
+			StableID:  string(p.StableID()),
+			Name:      peerDisplayName(p),
+			OS:        p.Hostinfo().OS(),
+			Online:    p.Online().Get(),
+			CanReboot: osCanReboot(p.Hostinfo().OS()),
 		})
 	}
 	slices.SortFunc(ret, func(a, b Target) int { return cmp.Compare(a.Name, b.Name) })

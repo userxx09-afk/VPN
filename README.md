@@ -146,6 +146,7 @@ installed one.
 | Feature | Code |
 |---|---|
 | Remote control (screen + input over the mesh) | `tappervpn/feature/remotecontrol/` (protocol, consent handshake, PeerAPI host + controller); Windows user-session helper `tappervpn/cmd/tappervpn-remote/`; Android/Fire TV in `tappervpn-android/` (`libtappervpn/remotecontrol.go` + `android/.../ipn/remotecontrol/`). Consent-gated: a peer connects, the target must accept, nothing is captured or controllable until it does. |
+| Remote restart (ask a device to restart when it has problems) | `tappervpn/feature/remotecontrol/restart*.go` (PeerAPI `/remotecontrol/v0/restart`, LocalAPI `remotecontrol/restart`); "Restart" on a device in the Windows app; "Restart this device" on a device's page in the Android/Fire TV app. Only devices with **Can restart others** on the Tapper Dashboard (`tag:remote-restart`) can send one, and the receiving device checks that tag itself. Windows, Linux and routers restart their VPN service or reboot (30 s warning); Android phones and Fire TV restart the VPN only, since an app can't reboot them. |
 | Per-app routing (Windows) | `tappervpn/feature/approuting/`, design in [docs/per-app-routing.md](docs/per-app-routing.md) |
 | Per-app exit nodes (Android) | `tappervpn-android/android/src/main/java/com/tappervpn/ipn/AppExitNodes.kt` |
 | Per-app policy in the control server | `headscale/hscontrol/policy/v2/` (nodeAttrs `app`) |
