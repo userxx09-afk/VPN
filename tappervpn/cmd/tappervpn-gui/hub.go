@@ -66,8 +66,8 @@ type Device struct {
 	ExitNode bool                 `json:"exitNode"` // offers itself as an exit node
 	// CanReboot: the whole device can be rebooted remotely (its VPN runs as
 	// a system service: Windows, Linux, routers). Phones and TVs can't.
-	CanReboot bool `json:"canReboot"`
-	LastSeen string               `json:"lastSeen,omitempty"`
+	CanReboot bool   `json:"canReboot"`
+	LastSeen  string `json:"lastSeen,omitempty"`
 }
 
 type Update struct {
